@@ -73,7 +73,7 @@ def test_project_info(fl):
 
 def test_list_channels_and_colour_order(fl):
     project, ctrl = fl
-    project.channels[0]["color"] = 0x0000FF        # BGR int -> red in low byte
+    project.channels[0]["color"] = 0xFF0000        # RGB int (COLOR_ORDER = "RGB", confirmed on real FL 24.2.2)
     r = roundtrip(project, ctrl, "list_channels")["result"]
     assert r["indexing"] == "global"
     assert r["channels"][0] == {"index": 0, "name": "Kick 909", "color": "#FF0000",
@@ -109,7 +109,7 @@ def test_mutations_create_undo_points(fl):
     assert roundtrip(project, ctrl, "rename_channel", {"index": 1, "name": "DR Snare"})["ok"]
     assert project.channels[1]["name"] == "DR Snare"
     r = roundtrip(project, ctrl, "set_channel_color", {"index": 1, "color": "#FF0000"})["result"]
-    assert r["to"] == "#FF0000" and project.channels[1]["color"] == 0x0000FF
+    assert r["to"] == "#FF0000" and project.channels[1]["color"] == 0xFF0000
     assert roundtrip(project, ctrl, "route_channel_to_mixer", {"index": 1, "track": 9})["result"]["to"] == 9
     assert roundtrip(project, ctrl, "rename_mixer_track", {"index": 9, "name": "Snare"})["result"]["to"] == "Snare"
     assert roundtrip(project, ctrl, "set_mixer_track_color", {"index": 9, "color": "#00FF00"})["ok"]

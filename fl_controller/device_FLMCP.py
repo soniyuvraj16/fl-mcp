@@ -69,7 +69,7 @@ UNDO_FLAGS = midi.UF_None
 # The stubs' utils.ColorToRGB assumes the opposite order, so we do the
 # conversion ourselves and make the order a single switch.  Step 6 of
 # docs/TEST_CHECKLIST.md tells you how to confirm it on your machine.
-COLOR_ORDER = "BGR"             # or "RGB"
+COLOR_ORDER = "RGB"             # or "RGB"
 
 # FL's own tempo limits (Project settings dialog).
 TEMPO_MIN = 10.0
