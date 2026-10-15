@@ -1,0 +1,48 @@
+{
+  "name_mixer_tracks": true,
+  "color_mixer_tracks": true,
+  "groups": [
+    {
+      "name": "Drums",
+      "prefix": "DR ",
+      "color": "#E74C3C",
+      "mixer_range": [1, 10],
+      "match": ["kick", "snare", "hat", "clap", "perc", "tom", "crash", "ride", "drum", "808", "fpc"]
+    },
+    {
+      "name": "Bass",
+      "prefix": "BS ",
+      "color": "#8E44AD",
+      "mixer_range": [11, 14],
+      "match": ["bass", "sub", "reese"]
+    },
+    {
+      "name": "Vocals",
+      "prefix": "VX ",
+      "color": "#2ECC71",
+      "mixer_range": [25, 30],
+      "match": ["vox", "vocal", "voc", "adlib", "harmony"]
+    },
+    {
+      "name": "Synths",
+      "prefix": "SY ",
+      "color": "#3498DB",
+      "mixer_range": [15, 24],
+      "match": ["lead", "pad", "pluck", "synth", "arp", "chord", "keys", "piano", "serum", "sytrus", "harmor", "vital", "flex"]
+    },
+    {
+      "name": "FX",
+      "prefix": "FX ",
+      "color": "#F39C12",
+      "mixer_range": [31, 36],
+      "match": ["fx", "riser", "impact", "sweep", "noise", "crash fx", "downlifter"]
+    },
+    {
+      "name": "Returns",
+      "prefix": "RT ",
+      "color": "#95A5A6",
+      "mixer_range": [37, 40],
+      "match": ["return", "send", "reverb", "delay"]
+    }
+  ]
+}
