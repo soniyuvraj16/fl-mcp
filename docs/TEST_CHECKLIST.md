@@ -106,6 +106,16 @@ shows an entry named `FLMCP: ...`, press Ctrl+Z, confirm the change reverted.
 - [ ] Export stems (File > Export > WAV, Split mixer tracks) to a folder and run
       `analyze_stems(folder=...)`: one entry per WAV, kick/bass stems dominant in
       sub/bass, hats in presence/air; `errors` is empty.
+- [ ] `list_audio_devices`: lists at least one loopback device (the Windows
+      default output, marked `default: true`). Options > Audio Settings in FL
+      must be "FL Studio ASIO" or a WASAPI/DirectSound device for the next step.
+- [ ] Press Play on a loop, then `analyze_live(tracks=[12, 13])` with two
+      tracks that carry sound: watch the mixer solo 12, then 13, then nothing;
+      each reply entry is non-silent with sensible bands/dynamics; `warnings`
+      is empty; the undo history gained NO entries. Mute a third track and solo
+      a fourth beforehand, run again, and confirm both flags come back
+      (`restored` lists them).
+- [ ] With transport stopped, `analyze_live()` returns "FL is not playing".
 
 If Ctrl+Z does **not** revert a change but the history entry exists, open
 `device_FLMCP.py`, change `UNDO_FLAGS = midi.UF_None` to

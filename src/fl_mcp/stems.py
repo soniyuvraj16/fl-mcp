@@ -151,7 +151,74 @@ def _top_peaks(freqs: np.ndarray, power: np.ndarray, top: int) -> list[dict]:
     return out
 
 
-def analyze_stem(samples: np.ndarray, rate: int, top: int = 3) -> dict:
+ST_WINDOW_S = 0.4            # short-term loudness window
+ST_HOP_S = 0.1
+ONSET_FRAME_S = 0.01         # envelope resolution for transient detection
+ONSET_RISE_DB = 6.0          # a frame this far above the recent envelope is an onset
+ONSET_FLOOR_DB = -40.0       # ...as long as it is audible
+ONSET_REFRACTORY_S = 0.05
+
+
+def _frame_rms(samples: np.ndarray, win: int, hop: int) -> np.ndarray:
+    if len(samples) < win:
+        return np.array([math.sqrt(float(np.mean(samples ** 2)))]) if len(samples) else np.array([0.0])
+    n = 1 + (len(samples) - win) // hop
+    idx = np.arange(win)[None, :] + hop * np.arange(n)[:, None]
+    return np.sqrt(np.mean(samples[idx] ** 2, axis=1))
+
+
+def dynamics(samples: np.ndarray, rate: int) -> dict:
+    """How the level moves over time: crest factor, loudness range, transients.
+
+    Spectrum says *where* a track sits; this says whether it is a steady pad
+    or a hitting drum, which decides compression and how it masks others.
+    """
+    peak = float(np.max(np.abs(samples))) if len(samples) else 0.0
+    rms = float(np.sqrt(np.mean(samples ** 2))) if len(samples) else 0.0
+    crest = (_db(peak) - _db(rms)) if rms > 0 else 0.0
+
+    st = _frame_rms(samples, int(rate * ST_WINDOW_S), int(rate * ST_HOP_S))
+    st_db = np.array([_db(v) for v in st if _db(v) > SILENCE_DB])
+    lra = float(np.percentile(st_db, 95) - np.percentile(st_db, 10)) if len(st_db) >= 3 else 0.0
+
+    frame = max(1, int(rate * ONSET_FRAME_S))
+    env = _frame_rms(samples, frame, frame)
+    env_db = np.array([_db(v) for v in env])
+    onsets, last = 0, -10 ** 9
+    refractory = int(ONSET_REFRACTORY_S / ONSET_FRAME_S)
+    for i in range(1, len(env_db)):
+        recent = env_db[max(0, i - 10):i]                 # previous 100 ms
+        recent = recent[np.isfinite(recent)]
+        ref = float(np.median(recent)) if len(recent) else -math.inf
+        if env_db[i] >= ONSET_FLOOR_DB and env_db[i] - ref >= ONSET_RISE_DB and i - last > refractory:
+            onsets += 1
+            last = i
+    seconds = len(samples) / rate if rate else 0.0
+    per_s = onsets / seconds if seconds > 0 else 0.0
+
+    if crest >= 12 and per_s >= 1:
+        character = "percussive"
+    elif crest < 8 and per_s < 1:
+        character = "sustained"
+    else:
+        character = "mixed"
+    return {"crest_db": round(crest, 1), "loudness_range_db": round(lra, 1),
+            "transients_per_s": round(per_s, 1), "character": character}
+
+
+def spectrum_power(samples: np.ndarray, rate: int) -> np.ndarray:
+    """Averaged power spectrum of `samples` (same framing as analyze_stem), for
+    use as the `bleed` argument of analyze_stem."""
+    return _power_spectrum(samples, rate)[1]
+
+
+def analyze_stem(samples: np.ndarray, rate: int, top: int = 3,
+                 bleed: np.ndarray | None = None) -> dict:
+    """Per-stem report.  `bleed` is a power spectrum (from spectrum_power) of
+    sound that is present in every capture but does not belong to this stem,
+    e.g. channels routed straight to Master when soloing inserts; it is
+    subtracted (power is additive for unrelated sources) before the band
+    shares, centroid and peaks are computed.  Levels and dynamics stay raw."""
     peak = float(np.max(np.abs(samples))) if len(samples) else 0.0
     rms = float(np.sqrt(np.mean(samples ** 2))) if len(samples) else 0.0
     result = {"duration_s": round(len(samples) / rate, 2), "rate": rate,
@@ -161,6 +228,13 @@ def analyze_stem(samples: np.ndarray, rate: int, top: int = 3) -> dict:
         return result
 
     freqs, power = _power_spectrum(samples, rate)
+    if bleed is not None and len(bleed) == len(power):
+        power = np.maximum(power - bleed, 0.0)
+        result["bleed_removed"] = True
+        if float(power[(freqs >= 20) & (freqs <= 20000)].sum()) <= 1e-3 * float(bleed.sum()):
+            result["silent"] = True          # nothing left once the bleed is gone
+            result["bleed_only"] = True
+            return result
     audible = (freqs >= 20) & (freqs <= 20000)
     total = float(power[audible].sum()) or 1.0
     bands = {}
@@ -174,8 +248,27 @@ def analyze_stem(samples: np.ndarray, rate: int, top: int = 3) -> dict:
         "dominant": [n for n, _, _ in BANDS if bands[n] >= 100 * DOMINANT_SHARE],
         "centroid_hz": int(round(centroid)),
         "top_peaks": _top_peaks(freqs, power, top),
+        "dynamics": dynamics(samples, rate),
     })
     return result
+
+
+def summarize(stems: list[dict]) -> dict:
+    """Cross-stem view: band clashes and loudness order.  Each stem dict needs
+    "name" plus whatever analyze_stem produced."""
+    live = [s for s in stems if not s.get("silent")]
+    clashes = []
+    for i in range(len(live)):
+        for j in range(i + 1, len(live)):
+            for name, _, _ in BANDS:
+                a, b = live[i]["bands_pct"][name], live[j]["bands_pct"][name]
+                if a >= 100 * CLASH_SHARE and b >= 100 * CLASH_SHARE:
+                    clashes.append({"band": name, "stems": [live[i]["name"], live[j]["name"]],
+                                    "shares_pct": [a, b], "severity": round(min(a, b), 1)})
+    clashes.sort(key=lambda c: -c["severity"])
+    loudness = sorted(({"name": s["name"], "rms_db": s["rms_db"], "peak_db": s["peak_db"]}
+                       for s in live), key=lambda r: -(r["rms_db"] or -999))
+    return {"clashes": clashes, "loudness_order": loudness}
 
 
 def analyze_folder(folder: str, max_seconds: float = 60.0, top: int = 3) -> dict:
@@ -198,25 +291,11 @@ def analyze_folder(folder: str, max_seconds: float = 60.0, top: int = 3) -> dict
         info["name"] = os.path.splitext(fn)[0]
         stems.append(info)
 
-    # A clash is two non-silent stems both leaning on the same band.
-    clashes = []
-    live = [s for s in stems if not s.get("silent")]
-    for i in range(len(live)):
-        for j in range(i + 1, len(live)):
-            for name, _, _ in BANDS:
-                a, b = live[i]["bands_pct"][name], live[j]["bands_pct"][name]
-                if a >= 100 * CLASH_SHARE and b >= 100 * CLASH_SHARE:
-                    clashes.append({"band": name, "stems": [live[i]["name"], live[j]["name"]],
-                                    "shares_pct": [a, b], "severity": round(min(a, b), 1)})
-    clashes.sort(key=lambda c: -c["severity"])
-
-    loudness = sorted(({"name": s["name"], "rms_db": s["rms_db"], "peak_db": s["peak_db"]}
-                       for s in live), key=lambda r: -(r["rms_db"] or -999))
-    return {
+    out = {
         "folder": folder,
         "bands_hz": {n: [lo, hi] for n, lo, hi in BANDS},
         "stems": stems,
-        "clashes": clashes,
-        "loudness_order": loudness,
         "errors": errors,
     }
+    out.update(summarize(stems))
+    return out

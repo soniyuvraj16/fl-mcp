@@ -233,6 +233,76 @@ def test_track_peaks(fl):
     assert project.undo_log == []                 # metering is read-only
 
 
+def test_solo_mute_without_undo(fl):
+    project, ctrl = fl
+    assert roundtrip(project, ctrl, "set_mixer_track_solo", {"index": 2, "solo": True, "mode": 1, "undo": False})["ok"]
+    assert project.tracks[2]["solo"] is True
+    assert roundtrip(project, ctrl, "set_mixer_track_mute", {"index": 2, "muted": True, "undo": False})["ok"]
+    assert project.undo_log == []
+    assert not roundtrip(project, ctrl, "set_mixer_track_solo", {"index": 2, "solo": True, "mode": 9})["ok"]
+    assert roundtrip(project, ctrl, "set_mixer_track_solo", {"index": 2, "solo": False})["ok"]
+    assert project.undo_log == ["FLMCP: solo mixer track 2"]
+
+
+def test_analyze_live_solos_records_and_restores(monkeypatch):
+    import numpy as np
+    from fl_mcp import server
+
+    calls: list[tuple] = []
+    tracks = [
+        {"index": 0, "name": "Master", "routed_channels": 5, "solo": False, "muted": False},
+        {"index": 1, "name": "kick", "routed_channels": 1, "solo": False, "muted": False},
+        {"index": 2, "name": "pad", "routed_channels": 1, "solo": False, "muted": True},
+        {"index": 3, "name": "Insert 3", "routed_channels": 0, "solo": False, "muted": False},
+        {"index": 4, "name": "bus", "routed_channels": 0, "fed_by": [1], "solo": False, "muted": False},
+    ]
+
+    def fake_call(cmd, **a):
+        calls.append((cmd, a))
+        if cmd == "list_mixer_tracks":
+            return {"tracks": tracks}
+        if cmd == "track_peaks":
+            return {"playing": True, "peaks": []}
+        if cmd == "list_channels":
+            return {"channels": [{"index": 0, "name": "808 Kick", "type": "sampler", "mixer_track": 0},
+                                 {"index": 1, "name": "auto", "type": "automation_clip", "mixer_track": 0}]}
+        return {}
+
+    rate = 48000
+    t = np.arange(rate) / rate
+    bleed = 0.1 * np.sin(2 * np.pi * 60 * t)                                     # 808 on Master
+    recordings = iter([
+        0.5 * np.sin(2 * np.pi * 45 * t) + 0.2 * np.sin(2 * np.pi * 2000 * t),   # mix
+        bleed,                                                                    # spare insert 3 soloed
+        0.5 * np.sin(2 * np.pi * 45 * t) + bleed,                                # kick
+        0.3 * np.sin(2 * np.pi * 2000 * t) + bleed,                              # pad
+        bleed,                                                                    # bus: nothing of its own
+    ])
+    monkeypatch.setattr(server, "_call", fake_call)
+    monkeypatch.setattr(server.live, "record", lambda s, d=None: (next(recordings).astype(np.float32), rate))
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+
+    fn = getattr(server.analyze_live, "fn", server.analyze_live)
+    r = fn(seconds=1.0)
+    assert [x["name"] for x in r["tracks"]] == ["kick", "pad", "bus"]      # empty Insert 3 skipped
+    assert "sub" in r["mix"]["dominant"] and r["tracks"][0]["dominant"] == ["sub"]
+    assert r["tracks"][1]["dominant"] == ["high_mid"]                       # bleed subtracted
+    assert r["tracks"][2]["silent"] and r["tracks"][2]["bleed_only"]
+    assert r["master_direct"]["channels"] == [{"index": 0, "name": "808 Kick"}]   # automation clip excluded
+    assert r["tracks"][0]["above_bleed_db"] > 10 and len(r["warnings"]) == 1 and "808 Kick" in r["warnings"][0]
+    assert r["clashes"] == [] and r["restored"] == {"solo": [], "muted": [2]}
+
+    solo_calls = [(a["index"], a["solo"]) for c, a in calls if c == "set_mixer_track_solo"]
+    assert solo_calls[:8] == [(3, True), (3, False), (1, True), (1, False), (2, True), (2, False), (4, True), (4, False)]
+    assert all(a["undo"] is False and a["mode"] == 3 for c, a in calls if c == "set_mixer_track_solo")
+    assert calls[-1] == ("set_mixer_track_mute", {"index": 2, "muted": True, "undo": False})   # mute restored
+
+    tracks[0]["solo"] = False
+    monkeypatch.setattr(server, "_call", lambda cmd, **a: {"playing": False} if cmd == "track_peaks" else {"tracks": tracks})
+    with pytest.raises(RuntimeError, match="not playing"):
+        fn()
+
+
 def test_get_track_levels_aggregates(monkeypatch):
     from fl_mcp import server
     snaps = iter([
@@ -313,9 +383,10 @@ def test_server_registers_expected_tools():
                           "set_mixer_track_mute", "set_mixer_track_solo",
                           "set_mixer_route", "create_bus",
                           "list_plugin_params", "set_plugin_param", "get_track_levels", "analyze_stems",
+                          "list_audio_devices", "analyze_live",
                           "apply_organization_template"}
     ro = {"fl_ping", "get_project_info", "list_channels", "list_mixer_tracks",
-          "list_plugin_params", "get_track_levels", "analyze_stems"}
+          "list_plugin_params", "get_track_levels", "analyze_stems", "list_audio_devices"}
     for name, t in tools.items():
         ann = t.annotations
         if isinstance(ann, dict):

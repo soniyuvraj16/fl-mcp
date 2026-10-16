@@ -26,8 +26,9 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from . import live
 from .midi_bridge import FLBridge, FLCommandError, FLConnectionError, get_bridge
-from .stems import analyze_folder
+from .stems import analyze_folder, analyze_stem, spectrum_power, summarize
 from .templates import normalise_hex, plan, strip_plan_metadata
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="fl-mcp %(levelname)s: %(message)s")
@@ -157,6 +158,121 @@ def analyze_stems(folder: str, max_seconds: float = 60.0, top: int = 3) -> dict:
         raise RuntimeError(str(e)) from None
 
 
+@mcp.tool(annotations=READ_ONLY)
+def list_audio_devices() -> dict:
+    """WASAPI loopback devices analyze_live can record from (default first).
+    FL must be playing through one of these (FL Studio ASIO or a WASAPI /
+    DirectSound device); hardware ASIO drivers bypass Windows and are silent."""
+    return {"devices": live.loopback_devices()}
+
+
+@mcp.tool(annotations=MUTATING)
+def analyze_live(tracks: list[int] | None = None, seconds: float = 2.0, top: int = 3,
+                 settle_s: float = 0.3, device: int | None = None, include_mix: bool = True) -> dict:
+    """Frequency + dynamics analysis of the live mix, no export needed. Press
+    Play on a loop in FL first. For each track (default: every non-empty insert)
+    the bridge solos it, records `seconds` of FL's output via WASAPI loopback,
+    and unsolos; mute/solo flags are restored at the end and none of the flips
+    leave undo entries. Channels routed straight to Master sound in every solo:
+    their bleed is captured separately (master_direct), subtracted from each
+    track's spectrum, and each track reports above_bleed_db (small = the
+    track itself is barely audible). Reports the same per-track data as analyze_stems plus
+    dynamics (crest factor, loudness range, transients, character), the full
+    mix, band clashes and loudness order. Takes about (seconds + settle_s) per
+    track. Not for hardware ASIO (see list_audio_devices)."""
+    seconds = max(0.5, min(float(seconds), 10.0))
+    settle_s = max(0.0, min(float(settle_s), 2.0))
+
+    snap = _call("list_mixer_tracks", include_empty=True)
+    by_index = {t["index"]: t for t in snap["tracks"]}
+    if tracks is None:
+        tracks = [i for i, t in by_index.items()
+                  if i != 0 and (t.get("routed_channels") or t.get("fed_by"))]
+    else:
+        missing = [t for t in tracks if t not in by_index]
+        if missing:
+            raise RuntimeError("unknown mixer tracks: %s" % missing)
+        if 0 in tracks:
+            raise RuntimeError("Master (0) cannot be soloed; the full mix is in `mix`")
+    if not tracks:
+        raise RuntimeError("no tracks to analyse (nothing is routed to any insert)")
+    if not _call("track_peaks", tracks=[0]).get("playing"):
+        raise RuntimeError("FL is not playing; press Play on a loop first")
+
+    original_solo = [i for i, t in by_index.items() if t.get("solo")]
+    original_mute = [i for i, t in by_index.items() if t.get("muted")]
+    results: list[dict] = []
+    warnings: list[str] = []
+    mix = None
+    bleed = None
+    bleed_power = None
+    touched: list[int] = []
+    # Soloing an insert never mutes channels that route straight to Master
+    # (FL's default route for every new channel), so they are heard in every
+    # capture.  Solo an unused insert first to record that bleed on its own.
+    spare = next((i for i, t in by_index.items()
+                  if i != 0 and i not in tracks and not t.get("routed_channels")
+                  and not t.get("fed_by") and not t.get("effects")), None)
+    try:
+        if include_mix and not original_solo:
+            samples, rate = live.record(seconds, device)
+            mix = analyze_stem(samples, rate, top)
+            mix["name"] = "mix"
+        if spare is not None:
+            _call("set_mixer_track_solo", index=spare, solo=True, mode=3, undo=False)
+            touched.append(spare)
+            time.sleep(settle_s)
+            samples, rate = live.record(seconds, device)
+            _call("set_mixer_track_solo", index=spare, solo=False, mode=3, undo=False)
+            bleed = analyze_stem(samples, rate, top)
+            bleed["name"] = "master_direct"
+            if not bleed.get("silent"):
+                bleed_power = spectrum_power(samples, rate)
+                direct = [c for c in _call("list_channels")["channels"]
+                          if c["mixer_track"] == 0 and c["type"] != "automation_clip"]
+                bleed["channels"] = [{"index": c["index"], "name": c["name"]} for c in direct]
+                names = ", ".join(c["name"] for c in direct[:8]) + (", ..." if len(direct) > 8 else "")
+                warnings.append("%d channel(s) route straight to Master and sound in every solo "
+                                "(%s); their spectrum was subtracted from each track, but levels "
+                                "and dynamics still include them. Route them to inserts for a "
+                                "clean reading." % (len(direct), names))
+        for t in tracks:
+            # mode 3 = solo with source AND send tracks.  Verified on FL 24.2.2:
+            # modes 1 and 4 mute Master itself, so the output goes silent; 3
+            # keeps the path to Master and lets a bus still hear its feeds.
+            _call("set_mixer_track_solo", index=t, solo=True, mode=3, undo=False)
+            touched.append(t)
+            time.sleep(settle_s)
+            samples, rate = live.record(seconds, device)
+            _call("set_mixer_track_solo", index=t, solo=False, mode=3, undo=False)
+            info = analyze_stem(samples, rate, top, bleed=bleed_power)
+            info.update(index=t, name=by_index[t]["name"])
+            if bleed_power is not None and info.get("rms_db") is not None and bleed.get("rms_db") is not None:
+                info["above_bleed_db"] = round(info["rms_db"] - bleed["rms_db"], 1)
+            results.append(info)
+    finally:
+        # Put the mixer back: nothing we soloed stays soloed, the user's solos
+        # return, and mutes return (FL clears mute when a track is soloed).
+        for t in touched:
+            _call("set_mixer_track_solo", index=t, solo=False, mode=3, undo=False)
+        for t in original_solo:
+            _call("set_mixer_track_solo", index=t, solo=True, undo=False)
+        for t in original_mute:
+            _call("set_mixer_track_mute", index=t, muted=True, undo=False)
+
+    if results and all(r.get("silent") for r in results):
+        warnings.append("loopback captured silence on every track: check FL's output device is "
+                        "FL Studio ASIO or a WASAPI device (hardware ASIO bypasses loopback), "
+                        "and that the loop actually contains these tracks")
+    if original_solo:
+        warnings.append("project had tracks soloed (%s); `mix` skipped and those solos restored"
+                        % original_solo)
+    out = {"seconds": seconds, "mix": mix, "master_direct": bleed, "tracks": results,
+           "restored": {"solo": original_solo, "muted": original_mute}, "warnings": warnings}
+    out.update(summarize(results))
+    return out
+
+
 # --------------------------------------------------------------------------
 # Mutating tools (each creates an undo point inside FL before changing anything)
 # --------------------------------------------------------------------------
@@ -220,9 +336,11 @@ def set_mixer_track_mute(index: int, muted: bool) -> dict:
 
 
 @mcp.tool(annotations=MUTATING)
-def set_mixer_track_solo(index: int, solo: bool) -> dict:
-    """Solo or unsolo a mixer track."""
-    return _call("set_mixer_track_solo", index=index, solo=solo)
+def set_mixer_track_solo(index: int, solo: bool, mode: int | None = None) -> dict:
+    """Solo or unsolo a mixer track. mode (optional): 1 = include source tracks,
+    2 = include send tracks, 3 = both, 4 = only this track; omit for FL's default.
+    Note FL clears a track's mute when it is soloed."""
+    return _call("set_mixer_track_solo", index=index, solo=solo, mode=mode)
 
 
 @mcp.tool(annotations=MUTATING)

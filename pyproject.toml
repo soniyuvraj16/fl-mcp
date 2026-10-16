@@ -10,6 +10,7 @@ dependencies = [
     "fastmcp>=2.10",
     "mido>=1.3.3",
     "numpy>=1.26",
+    "pyaudiowpatch>=0.2.12; sys_platform == 'win32'",
     "python-rtmidi>=1.5.8",
 ]
 

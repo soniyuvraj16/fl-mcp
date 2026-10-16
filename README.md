@@ -140,7 +140,9 @@ should return the FL version.
 | `list_plugin_params`           | read-only  | `track`+`slot` or `channel`; name, value 0–1 and the plugin's text per param; `filter`, `max_params` |
 | `set_plugin_param`             | mutating   | `param` (index or name), `value` 0–1, `track`+`slot` or `channel`           |
 | `get_track_levels`             | read-only  | polls `getTrackPeaks` for `duration_s` while FL plays; peak/avg in dBFS     |
-| `analyze_stems`                | read-only  | FFT of exported stem WAVs in `folder`: band energy, peaks, clashes (server-side, no FL call) |
+| `analyze_stems`                | read-only  | FFT of exported stem WAVs in `folder`: band energy, peaks, dynamics, clashes (server-side, no FL call) |
+| `list_audio_devices`           | read-only  | WASAPI loopback devices `analyze_live` can record from                      |
+| `analyze_live`                 | mutating*  | solo each track, record FL's output via loopback, same analysis as stems; captures and subtracts the bleed of channels routed straight to Master (`master_direct`, `above_bleed_db`); `tracks`, `seconds`, `device`. *flips solo/mute and restores them, no undo entries |
 | `apply_organization_template`  | mutating   | `template` (JSON), `dry_run` (default `true`)                                |
 
 `volume_db` is converted with FL's fader law, fitted on 24.2.2:
@@ -156,13 +158,27 @@ one undo point for the whole batch. Read-only tools never call a setter.
 ### Mixing workflow
 
 The scripting API exposes no audio, so "what frequencies are on this track" is
-answered offline:
+answered by listening from outside FL, two ways:
 
+**Live (no export).** Press Play on a loop and call `analyze_live()`. For each
+non-empty insert the bridge solos it (solo mode 3, sources and sends; modes 1
+and 4 mute Master and capture silence), records a couple of seconds of FL's
+output through WASAPI loopback (`pyaudiowpatch`), unsolos, and finally puts
+every solo/mute flag back. Works when FL plays through *FL Studio ASIO* or a
+WASAPI/DirectSound device; a hardware ASIO driver or ASIO4ALL bypasses Windows
+and loopback hears silence (`list_audio_devices` shows what is capturable).
+
+**Stems (any driver).**
 1. In FL: File > Export > WAV, tick **Split mixer tracks**, export a short loop
    where everything plays. One WAV per mixer track lands in the folder.
 2. `analyze_stems(folder=...)` reports each stem's energy per band, its top
    spectral peaks, and *clashes* (two stems both leaning on the same band).
-3. Act on it through FL: `get_track_levels` while playing for balance,
+
+Both report, per track: peak/RMS dBFS, energy share per band, spectral
+centroid and peaks, and *dynamics* (crest factor, loudness range over time,
+transients per second, percussive/sustained/mixed), plus clashes and a
+loudness order across tracks.
+Then act on it through FL: `get_track_levels` while playing for balance,
    `set_mixer_track_volume` / `set_mixer_track_pan`, `create_bus`, and
    `list_plugin_params` + `set_plugin_param` to move EQ bands on a Fruity
    Parametric EQ 2 you have loaded (plugins cannot be loaded by script).

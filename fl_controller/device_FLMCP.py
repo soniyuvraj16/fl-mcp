@@ -494,12 +494,17 @@ def _deferred_state(index, **applied):
     return state
 
 
+# Mute and solo accept undo=false: analyze_live flips solo on and off once per
+# track and puts every flag back itself, and one undo entry per flip would
+# bury the user's real history.  Everything else keeps the undo point.
+
 def cmd_set_mixer_track_mute(args):
     index = args.get("index")
     _check_track(index)
     want = bool(args.get("muted"))
     before = _track_state(index)
-    _mutating("mute mixer track %s" % index)
+    if args.get("undo", True):
+        _mutating("mute mixer track %s" % index)
     mixer.muteTrack(index, 1 if want else 0)      # explicit value, not toggle
     return {"from": before, "to": _deferred_state(index, muted=want)}
 
@@ -508,9 +513,16 @@ def cmd_set_mixer_track_solo(args):
     index = args.get("index")
     _check_track(index)
     want = bool(args.get("solo"))
+    mode = args.get("mode")                       # FL solo mode 1..4, None = FL's default
+    if mode is not None and mode not in (1, 2, 3, 4):
+        raise ValueError("mode must be 1..4, got %r" % (mode,))
     before = _track_state(index)
-    _mutating("solo mixer track %s" % index)
-    mixer.soloTrack(index, 1 if want else 0)
+    if args.get("undo", True):
+        _mutating("solo mixer track %s" % index)
+    if mode is None:
+        mixer.soloTrack(index, 1 if want else 0)
+    else:
+        mixer.soloTrack(index, 1 if want else 0, mode)
     return {"from": before, "to": _deferred_state(index, solo=want)}
 
 # ---------------------------------------------------------------------------
