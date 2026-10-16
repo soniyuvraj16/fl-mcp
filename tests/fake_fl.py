@@ -92,8 +92,15 @@ def build_modules(project: FakeProject) -> dict[str, types.ModuleType]:
     mx.setTrackName = lambda t, n: project.tracks[t].__setitem__("name", n)
     mx.getTrackColor = lambda t: project.tracks[t]["color"]
     mx.setTrackColor = lambda t, c: project.tracks[t].__setitem__("color", c)
-    mx.getTrackVolume = lambda t, mode=0: project.tracks[t]["volume"] if mode == 0 else -2.0
+    # dB readout: monotonic stand-in for FL's fader law (0.8 -> 0 dB, 1.0 -> +5.6 dB).
+    mx.getTrackVolume = lambda t, mode=0: project.tracks[t]["volume"] if mode == 0 else (project.tracks[t]["volume"] - 0.8) * 28.0
+    mx.setTrackVolume = lambda t, v: project.tracks[t].__setitem__("volume", v)
     mx.getTrackPan = lambda t: project.tracks[t]["pan"]
+    mx.setTrackPan = lambda t, p: project.tracks[t].__setitem__("pan", p)
+    mx.isTrackMuted = lambda t: project.tracks[t].get("muted", False)
+    mx.muteTrack = lambda t: project.tracks[t].__setitem__("muted", not project.tracks[t].get("muted", False))
+    mx.isTrackSolo = lambda t: project.tracks[t].get("solo", False)
+    mx.soloTrack = lambda t: project.tracks[t].__setitem__("solo", not project.tracks[t].get("solo", False))
     m["mixer"] = mx
 
     # --- patterns ---------------------------------------------------------

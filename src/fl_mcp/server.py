@@ -132,6 +132,32 @@ def set_tempo(bpm: float) -> dict:
 
 
 @mcp.tool(annotations=MUTATING)
+def set_mixer_track_volume(index: int, volume: float | None = None, volume_db: float | None = None) -> dict:
+    """Set a mixer track's fader. Give exactly one of volume (0-1, where 0.8 = 0 dB)
+    or volume_db (e.g. -6). Returns the track's volume, dB, pan, mute and solo
+    before and after."""
+    return _call("set_mixer_track_volume", index=index, volume=volume, volume_db=volume_db)
+
+
+@mcp.tool(annotations=MUTATING)
+def set_mixer_track_pan(index: int, pan: float) -> dict:
+    """Set a mixer track's pan, -1 (full left) to 1 (full right), 0 = centre."""
+    return _call("set_mixer_track_pan", index=index, pan=pan)
+
+
+@mcp.tool(annotations=MUTATING)
+def set_mixer_track_mute(index: int, muted: bool) -> dict:
+    """Mute or unmute a mixer track."""
+    return _call("set_mixer_track_mute", index=index, muted=muted)
+
+
+@mcp.tool(annotations=MUTATING)
+def set_mixer_track_solo(index: int, solo: bool) -> dict:
+    """Solo or unsolo a mixer track."""
+    return _call("set_mixer_track_solo", index=index, solo=solo)
+
+
+@mcp.tool(annotations=MUTATING)
 def apply_organization_template(template: dict | str, dry_run: bool = True) -> dict:
     """Rename, colour and route channels according to a JSON template of groups.
 

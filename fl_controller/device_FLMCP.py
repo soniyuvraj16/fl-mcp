@@ -381,6 +381,95 @@ def cmd_set_tempo(args):
     return {"from": before, "to": _tempo_bpm(), "requested": bpm}
 
 
+def _track_state(index):
+    return {
+        "index": index,
+        "volume": round(mixer.getTrackVolume(index), 4),
+        "volume_db": round(mixer.getTrackVolume(index, 1), 2),
+        "pan": round(mixer.getTrackPan(index), 4),
+        "muted": bool(mixer.isTrackMuted(index)),
+        "solo": bool(mixer.isTrackSolo(index)),
+    }
+
+
+def _volume_for_db(index, db):
+    """Find the 0..1 fader value whose dB readout is closest to db.
+
+    FL's fader law is not a plain formula we can trust, so we bisect against
+    mixer.getTrackVolume(index, 1) (the dB readout).  The fader is monotonic,
+    so 24 steps is far more precision than FL stores.
+    """
+    lo, hi = 0.0, 1.0
+    for _ in range(24):
+        mid = (lo + hi) / 2.0
+        mixer.setTrackVolume(index, mid)
+        if mixer.getTrackVolume(index, 1) < db:
+            lo = mid
+        else:
+            hi = mid
+    return hi
+
+
+def cmd_set_mixer_track_volume(args):
+    index = args.get("index")
+    _check_track(index)
+    has_vol, has_db = args.get("volume") is not None, args.get("volume_db") is not None
+    if has_vol == has_db:
+        raise ValueError("give exactly one of volume (0..1) or volume_db")
+    if has_vol:
+        vol = float(args["volume"])
+        if not (0.0 <= vol <= 1.0):
+            raise ValueError("volume must be 0..1 (0.8 = 0 dB), got %r" % (vol,))
+    else:
+        db = float(args["volume_db"])
+    before = _track_state(index)
+    _mutating("set volume mixer track %s" % index)
+    if has_vol:
+        mixer.setTrackVolume(index, vol)
+    else:
+        mixer.setTrackVolume(index, 1.0)
+        top = mixer.getTrackVolume(index, 1)
+        if db > top:
+            mixer.setTrackVolume(index, before["volume"])
+            raise ValueError("volume_db %.2f above FL's fader maximum %.2f" % (db, top))
+        mixer.setTrackVolume(index, _volume_for_db(index, db))
+    return {"from": before, "to": _track_state(index)}
+
+
+def cmd_set_mixer_track_pan(args):
+    index = args.get("index")
+    _check_track(index)
+    pan = float(args.get("pan"))
+    if not (-1.0 <= pan <= 1.0):
+        raise ValueError("pan must be -1..1, got %r" % (pan,))
+    before = _track_state(index)
+    _mutating("set pan mixer track %s" % index)
+    mixer.setTrackPan(index, pan)
+    return {"from": before, "to": _track_state(index)}
+
+
+def cmd_set_mixer_track_mute(args):
+    index = args.get("index")
+    _check_track(index)
+    before = _track_state(index)
+    _mutating("mute mixer track %s" % index)
+    want = bool(args.get("muted"))
+    if before["muted"] != want:          # muteTrack toggles when no value is given
+        mixer.muteTrack(index)
+    return {"from": before, "to": _track_state(index)}
+
+
+def cmd_set_mixer_track_solo(args):
+    index = args.get("index")
+    _check_track(index)
+    before = _track_state(index)
+    _mutating("solo mixer track %s" % index)
+    want = bool(args.get("solo"))
+    if before["solo"] != want:
+        mixer.soloTrack(index)
+    return {"from": before, "to": _track_state(index)}
+
+
 # Operations cmd_batch may perform.  Still a whitelist: the op name selects
 # one of the helpers above; nothing else is reachable.
 BATCH_OPS = {
@@ -439,6 +528,10 @@ COMMANDS = {
     "rename_mixer_track": cmd_rename_mixer_track,
     "set_mixer_track_color": cmd_set_mixer_track_color,
     "set_tempo": cmd_set_tempo,
+    "set_mixer_track_volume": cmd_set_mixer_track_volume,
+    "set_mixer_track_pan": cmd_set_mixer_track_pan,
+    "set_mixer_track_mute": cmd_set_mixer_track_mute,
+    "set_mixer_track_solo": cmd_set_mixer_track_solo,
     "batch": cmd_batch,
 }
 

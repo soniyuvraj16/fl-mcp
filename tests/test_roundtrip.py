@@ -126,6 +126,24 @@ def test_set_tempo_via_rec_event(fl):
     assert len(project.undo_log) == 1            # the failed call made no undo point
 
 
+def test_mixer_volume_pan_mute_solo(fl):
+    project, ctrl = fl
+    r = roundtrip(project, ctrl, "set_mixer_track_volume", {"index": 3, "volume": 0.5})["result"]
+    assert r["from"]["volume"] == 0.8 and r["to"]["volume"] == 0.5
+    r = roundtrip(project, ctrl, "set_mixer_track_volume", {"index": 3, "volume_db": -6.0})["result"]
+    assert abs(r["to"]["volume_db"] - -6.0) < 0.05
+    bad = roundtrip(project, ctrl, "set_mixer_track_volume", {"index": 3, "volume_db": 20})
+    assert not bad["ok"] and "maximum" in bad["error"]
+    assert not roundtrip(project, ctrl, "set_mixer_track_volume", {"index": 3})["ok"]
+    assert roundtrip(project, ctrl, "set_mixer_track_pan", {"index": 3, "pan": -0.5})["result"]["to"]["pan"] == -0.5
+    assert not roundtrip(project, ctrl, "set_mixer_track_pan", {"index": 3, "pan": 2})["ok"]
+    assert roundtrip(project, ctrl, "set_mixer_track_mute", {"index": 3, "muted": True})["result"]["to"]["muted"]
+    # idempotent: muting an already-muted track must not toggle it back
+    assert roundtrip(project, ctrl, "set_mixer_track_mute", {"index": 3, "muted": True})["result"]["to"]["muted"]
+    assert roundtrip(project, ctrl, "set_mixer_track_solo", {"index": 3, "solo": True})["result"]["to"]["solo"]
+    assert not roundtrip(project, ctrl, "set_mixer_track_solo", {"index": 3, "solo": False})["result"]["to"]["solo"]
+
+
 def test_errors_are_clean(fl):
     project, ctrl = fl
     r = roundtrip(project, ctrl, "rename_channel", {"index": 99, "name": "nope"})
@@ -187,6 +205,8 @@ def test_server_registers_expected_tools():
     assert set(tools) == {"fl_ping", "get_project_info", "list_channels", "list_mixer_tracks",
                           "rename_channel", "set_channel_color", "route_channel_to_mixer",
                           "rename_mixer_track", "set_mixer_track_color", "set_tempo",
+                          "set_mixer_track_volume", "set_mixer_track_pan",
+                          "set_mixer_track_mute", "set_mixer_track_solo",
                           "apply_organization_template"}
     ro = {"fl_ping", "get_project_info", "list_channels", "list_mixer_tracks"}
     for name, t in tools.items():
