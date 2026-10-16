@@ -41,6 +41,7 @@ Safety rules baked into this file
 """
 
 import json
+import math
 
 import channels
 import device
@@ -49,6 +50,7 @@ import midi
 import mixer
 import patterns
 import plugins
+import transport
 import ui
 
 # ---------------------------------------------------------------------------
@@ -257,6 +259,14 @@ def cmd_list_mixer_tracks(args):
         t = _ch(channels.getTargetFxTrack, i)
         routed[t] = routed.get(t, 0) + 1
 
+    # Track-to-track sends, so a bus (fed only by other tracks) is not "empty".
+    routes = {t: _track_routes(t) for t in range(mixer.trackCount())}
+    fed_by = {}
+    for src, dests in routes.items():
+        for d in dests:
+            if d["to"] != 0:                 # everything feeds Master by default
+                fed_by.setdefault(d["to"], []).append(src)
+
     out = []
     for t in range(mixer.trackCount()):
         effects = []
@@ -267,16 +277,21 @@ def cmd_list_mixer_tracks(args):
             except Exception:
                 pass
         n_routed = routed.get(t, 0)
-        if not include_empty and t != 0 and not effects and n_routed == 0:
+        sources = fed_by.get(t, [])
+        if not include_empty and t != 0 and not effects and n_routed == 0 and not sources:
             continue
         out.append({
             "index": t,
             "name": mixer.getTrackName(t),
             "color": color_to_hex(mixer.getTrackColor(t)),
             "volume": round(mixer.getTrackVolume(t), 4),
-            "volume_db": round(mixer.getTrackVolume(t, 1), 2),
+            "volume_db": _round_db(mixer.getTrackVolume(t, 1)),
             "pan": round(mixer.getTrackPan(t), 4),
+            "muted": bool(mixer.isTrackMuted(t)),
+            "solo": bool(mixer.isTrackSolo(t)),
             "routed_channels": n_routed,
+            "routes": routes[t],
+            "fed_by": sources,
             "effects": effects,
         })
     return {"tracks": out, "total_tracks": mixer.trackCount()}
@@ -381,33 +396,47 @@ def cmd_set_tempo(args):
     return {"from": before, "to": _tempo_bpm(), "requested": bpm}
 
 
+# FL's mixer fader law, fitted on FL Studio 24.2.2 against the dB readout
+# (mixer.getTrackVolume(index, 1)); 13 points across the range all agree
+# within 0.01 dB:  amplitude = (e^(3v) - 1) / (e^(2.4) - 1).  So v = 0.8 is
+# unity (0 dB), v = 1.0 is +5.59 dB and v = 0 is silence.  We compute the
+# fader value from this instead of searching against the readout, because
+# FL applies setTrackVolume on its next tick on some tracks and a read in the
+# same callback can still return the old value.
+_FADER_K = 3.0
+_FADER_DEN = math.exp(_FADER_K * 0.8) - 1.0
+
+
+def fader_to_db(v):
+    """0..1 fader value -> dB (None for silence)."""
+    if v <= 0.0:
+        return None
+    return 20.0 * math.log10((math.exp(_FADER_K * v) - 1.0) / _FADER_DEN)
+
+
+def db_to_fader(db):
+    """dB -> 0..1 fader value (inverse of fader_to_db)."""
+    return math.log(1.0 + (10.0 ** (db / 20.0)) * _FADER_DEN) / _FADER_K
+
+
+FADER_MAX_DB = fader_to_db(1.0)
+
+
+def _round_db(x):
+    """FL reports -inf dB for a silent fader; JSON has no -inf, so use None."""
+    x = float(x)
+    return round(x, 2) if math.isfinite(x) else None
+
+
 def _track_state(index):
     return {
         "index": index,
         "volume": round(mixer.getTrackVolume(index), 4),
-        "volume_db": round(mixer.getTrackVolume(index, 1), 2),
+        "volume_db": _round_db(mixer.getTrackVolume(index, 1)),
         "pan": round(mixer.getTrackPan(index), 4),
         "muted": bool(mixer.isTrackMuted(index)),
         "solo": bool(mixer.isTrackSolo(index)),
     }
-
-
-def _volume_for_db(index, db):
-    """Find the 0..1 fader value whose dB readout is closest to db.
-
-    FL's fader law is not a plain formula we can trust, so we bisect against
-    mixer.getTrackVolume(index, 1) (the dB readout).  The fader is monotonic,
-    so 24 steps is far more precision than FL stores.
-    """
-    lo, hi = 0.0, 1.0
-    for _ in range(24):
-        mid = (lo + hi) / 2.0
-        mixer.setTrackVolume(index, mid)
-        if mixer.getTrackVolume(index, 1) < db:
-            lo = mid
-        else:
-            hi = mid
-    return hi
 
 
 def cmd_set_mixer_track_volume(args):
@@ -422,18 +451,22 @@ def cmd_set_mixer_track_volume(args):
             raise ValueError("volume must be 0..1 (0.8 = 0 dB), got %r" % (vol,))
     else:
         db = float(args["volume_db"])
+        if db > FADER_MAX_DB:
+            raise ValueError("volume_db %.2f above FL's fader maximum %.2f" % (db, FADER_MAX_DB))
+        vol = db_to_fader(db)
     before = _track_state(index)
     _mutating("set volume mixer track %s" % index)
-    if has_vol:
-        mixer.setTrackVolume(index, vol)
-    else:
-        mixer.setTrackVolume(index, 1.0)
-        top = mixer.getTrackVolume(index, 1)
-        if db > top:
-            mixer.setTrackVolume(index, before["volume"])
-            raise ValueError("volume_db %.2f above FL's fader maximum %.2f" % (db, top))
-        mixer.setTrackVolume(index, _volume_for_db(index, db))
-    return {"from": before, "to": _track_state(index)}
+    mixer.setTrackVolume(index, vol)
+    after = _track_state(index)
+    db_set = fader_to_db(vol)
+    return {
+        "from": before,
+        "to": after,
+        "set": {"volume": round(vol, 4), "volume_db": None if db_set is None else round(db_set, 2)},
+        # FL sometimes applies the fader on its next tick; when the read-back
+        # does not match what we just set, "to" is stale and "set" is the truth.
+        "readback_stale": abs(after["volume"] - vol) > 1e-3,
+    }
 
 
 def cmd_set_mixer_track_pan(args):
@@ -445,29 +478,296 @@ def cmd_set_mixer_track_pan(args):
     before = _track_state(index)
     _mutating("set pan mixer track %s" % index)
     mixer.setTrackPan(index, pan)
-    return {"from": before, "to": _track_state(index)}
+    return {"from": before, "to": _deferred_state(index, pan=pan)}
+
+
+def _deferred_state(index, **applied):
+    """Track state after a pan/mute/solo change.
+
+    Verified on FL 24.2.2: setTrackPan/muteTrack/soloTrack take effect, but
+    reading the value back inside the same call still returns the OLD one
+    (FL applies it on its next tick; a later read shows it).  Volume does
+    read back immediately.  So report the requested value for the fields we
+    just set and the live readback for everything else."""
+    state = _track_state(index)
+    state.update(applied)
+    return state
 
 
 def cmd_set_mixer_track_mute(args):
     index = args.get("index")
     _check_track(index)
+    want = bool(args.get("muted"))
     before = _track_state(index)
     _mutating("mute mixer track %s" % index)
-    want = bool(args.get("muted"))
-    if before["muted"] != want:          # muteTrack toggles when no value is given
-        mixer.muteTrack(index)
-    return {"from": before, "to": _track_state(index)}
+    mixer.muteTrack(index, 1 if want else 0)      # explicit value, not toggle
+    return {"from": before, "to": _deferred_state(index, muted=want)}
 
 
 def cmd_set_mixer_track_solo(args):
     index = args.get("index")
     _check_track(index)
+    want = bool(args.get("solo"))
     before = _track_state(index)
     _mutating("solo mixer track %s" % index)
-    want = bool(args.get("solo"))
-    if before["solo"] != want:
-        mixer.soloTrack(index)
-    return {"from": before, "to": _track_state(index)}
+    mixer.soloTrack(index, 1 if want else 0)
+    return {"from": before, "to": _deferred_state(index, solo=want)}
+
+# ---------------------------------------------------------------------------
+# Mixer routing (track -> track).  Every insert sends to Master by default;
+# a "bus" is just an insert that other inserts send to instead of Master.
+# ---------------------------------------------------------------------------
+
+def _track_routes(index):
+    """Destinations the track at `index` sends to, with send levels (0..1)."""
+    out = []
+    for dest in range(mixer.trackCount()):
+        if dest == index:
+            continue
+        try:
+            if not mixer.getRouteSendActive(index, dest):
+                continue
+        except Exception:
+            continue
+        level = None
+        try:
+            level = round(mixer.getRouteToLevel(index, dest), 4)
+        except Exception:
+            pass
+        out.append({"to": dest, "level": level})
+    return out
+
+
+def _check_route(source, dest):
+    _check_track(source)
+    _check_track(dest)
+    if source == dest:
+        raise ValueError("a track cannot route to itself (%s)" % source)
+    if source == 0:
+        raise ValueError("Master (track 0) cannot be routed anywhere")
+
+
+def _set_route_apply(source, dest, enabled, level=None):
+    mixer.setRouteTo(source, dest, 1 if enabled else 0)
+    if enabled and level is not None:
+        mixer.setRouteToLevel(source, dest, float(level))
+
+
+def cmd_set_mixer_route(args):
+    source, dest = args.get("source"), args.get("dest")
+    _check_route(source, dest)
+    enabled = bool(args.get("enabled", True))
+    level = args.get("level")
+    if level is not None:
+        level = float(level)
+        if not (0.0 <= level <= 1.0):
+            raise ValueError("level must be 0..1 (0.8 = 0 dB), got %r" % (level,))
+    before = _track_routes(source)
+    _mutating("route mixer track %s -> %s" % (source, dest))
+    _set_route_apply(source, dest, enabled, level)
+    mixer.afterRoutingChanged()
+    return {"source": source, "dest": dest, "enabled": enabled, "level": level,
+            "routes_before": before, "routes_after": _track_routes(source)}
+
+
+def cmd_create_bus(args):
+    """Send several tracks into one bus track under a single undo point.
+
+    Each source is routed to the bus and (unless keep_master) its default
+    send to Master is removed, so the bus is the only path to Master."""
+    bus = args.get("bus")
+    sources = args.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise ValueError("sources must be a non-empty list of track indices")
+    _check_track(bus)
+    if bus == 0:
+        raise ValueError("Master (track 0) cannot be a bus")
+    for s in sources:
+        _check_route(s, bus)
+    if len(set(sources)) != len(sources):
+        raise ValueError("sources contains duplicates")
+    name = args.get("name")
+    color = args.get("color")
+    if color is not None:
+        hex_to_color(color)                   # validate before the undo point
+    keep_master = bool(args.get("keep_master", False))
+
+    _mutating("create bus on mixer track %s" % bus)
+    for s in sources:
+        _set_route_apply(s, bus, True)
+        if not keep_master:
+            _set_route_apply(s, 0, False)
+    mixer.afterRoutingChanged()
+    result = {"bus": bus, "sources": sources, "keep_master": keep_master}
+    if name:
+        result["renamed"] = _rename_track_apply(bus, name)
+    if color is not None:
+        result["colored"] = _set_track_color_apply(bus, color)
+    result["routes"] = {str(s): _track_routes(s) for s in sources}
+    result["bus_routes"] = _track_routes(bus)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Plugin parameters.  A target is a mixer slot (track + slot) or a channel-rack
+# plugin (channel).  FL hands us every value normalised to 0..1; the plugin's
+# own text for it ("200 Hz", "-3.0 dB") comes back as value_string so the
+# caller can map between the two.
+# ---------------------------------------------------------------------------
+
+def _plugin_target(args):
+    """-> (index, slot, is_channel), after checking a plugin is actually there."""
+    channel, track, slot = args.get("channel"), args.get("track"), args.get("slot")
+    if channel is not None:
+        if track is not None or slot is not None:
+            raise ValueError("give either channel, or track + slot, not both")
+        _check_channel(channel)
+        if not _ch(plugins.isValid, channel, -1):
+            raise ValueError("channel %s has no plugin (samples are not plugins)" % channel)
+        return channel, -1, True
+    _check_track(track)
+    if not isinstance(slot, int) or slot < 0 or slot >= FX_SLOTS:
+        raise ValueError("slot must be 0..%d, got %r" % (FX_SLOTS - 1, slot))
+    if not plugins.isValid(track, slot):
+        raise ValueError("mixer track %s slot %s is empty" % (track, slot))
+    return track, slot, False
+
+
+def _gflag(is_channel):
+    """Extra positional useGlobalIndex argument for plugins.* calls.
+    Only channel-rack targets need it (mixer slots are never grouped)."""
+    return (True,) if (is_channel and use_global_index()) else ()
+
+
+def _param_text(p, idx, slot, is_channel):
+    """The plugin's display string for a parameter, or None if it has none."""
+    g = _gflag(is_channel)
+    try:
+        s = plugins.getParamValueString(p, idx, slot, midi.PIM_None, *g)
+        if s:
+            return s
+    except Exception:
+        pass
+    try:
+        s = plugins.getName(idx, slot, midi.FPN_ParamValue, p, *g)
+        return s or None
+    except Exception:
+        return None
+
+
+def _param_count(idx, slot, is_channel):
+    return plugins.getParamCount(idx, slot, *_gflag(is_channel))
+
+
+def _param_name(p, idx, slot, is_channel):
+    return plugins.getParamName(p, idx, slot, *_gflag(is_channel))
+
+
+def _param_value(p, idx, slot, is_channel):
+    return plugins.getParamValue(p, idx, slot, *_gflag(is_channel))
+
+
+def _target_desc(idx, slot, is_channel):
+    d = {"channel": idx} if is_channel else {"track": idx, "slot": slot}
+    d["plugin"] = plugins.getPluginName(idx, slot, False, *_gflag(is_channel))
+    return d
+
+
+def cmd_list_plugin_params(args):
+    idx, slot, is_ch = _plugin_target(args)
+    needle = (args.get("filter") or "").lower()
+    limit = int(args.get("max_params") or 200)
+    count = _param_count(idx, slot, is_ch)
+    params = []
+    truncated = False
+    for p in range(count):
+        name = _param_name(p, idx, slot, is_ch)
+        if not name:                        # VSTs report 4240 slots, most unused
+            continue
+        if needle and needle not in name.lower():
+            continue
+        if len(params) >= limit:
+            truncated = True
+            break
+        params.append({
+            "index": p,
+            "name": name,
+            "value": round(_param_value(p, idx, slot, is_ch), 4),
+            "value_string": _param_text(p, idx, slot, is_ch),
+        })
+    out = _target_desc(idx, slot, is_ch)
+    out.update({"param_count": count, "params": params, "truncated": truncated})
+    return out
+
+
+def _resolve_param(param, idx, slot, is_ch):
+    """param may be an index or a name (exact, else unique substring, case-insensitive)."""
+    count = _param_count(idx, slot, is_ch)
+    if isinstance(param, int):
+        if param < 0 or param >= count:
+            raise ValueError("param index %r out of range 0..%d" % (param, count - 1))
+        return param
+    needle = str(param).strip().lower()
+    if not needle:
+        raise ValueError("param must be an index or a name")
+    names = [(p, _param_name(p, idx, slot, is_ch)) for p in range(count)]
+    exact = [p for p, n in names if n and n.lower() == needle]
+    if len(exact) == 1:
+        return exact[0]
+    partial = [p for p, n in names if n and needle in n.lower()]
+    if len(partial) == 1:
+        return partial[0]
+    if not partial:
+        raise ValueError("no parameter named %r" % (param,))
+    raise ValueError("parameter name %r is ambiguous: %s" % (
+        param, ", ".join("%d=%s" % (p, n) for p, n in names if p in partial[:8])))
+
+
+def cmd_set_plugin_param(args):
+    idx, slot, is_ch = _plugin_target(args)
+    p = _resolve_param(args.get("param"), idx, slot, is_ch)
+    try:
+        value = float(args.get("value"))
+    except (TypeError, ValueError):
+        raise ValueError("value must be a number 0..1, got %r" % (args.get("value"),))
+    if not (0.0 <= value <= 1.0):
+        raise ValueError("value must be 0..1, got %r" % (value,))
+    name = _param_name(p, idx, slot, is_ch)
+    before = {"value": round(_param_value(p, idx, slot, is_ch), 4),
+              "value_string": _param_text(p, idx, slot, is_ch)}
+    _mutating("set %s on %s" % (name, _target_desc(idx, slot, is_ch)["plugin"]))
+    plugins.setParamValue(value, p, idx, slot, midi.PIM_None, *_gflag(is_ch))
+    after = {"value": round(_param_value(p, idx, slot, is_ch), 4),
+             "value_string": _param_text(p, idx, slot, is_ch)}
+    out = _target_desc(idx, slot, is_ch)
+    # Verified on FL 24.2.2: the plugin's text updates at once but
+    # getParamValue can still return the old number inside the same call.
+    out.update({"param": p, "name": name, "requested": value, "from": before, "to": after,
+                "readback_stale": abs(after["value"] - value) > 1e-3})
+    return out
+
+# ---------------------------------------------------------------------------
+# Metering.  One snapshot per call; the server polls this while FL plays.
+# ---------------------------------------------------------------------------
+
+def _track_peak(t):
+    try:
+        return float(mixer.getTrackPeaks(t, 2))          # max of L/R
+    except Exception:
+        return max(float(mixer.getTrackPeaks(t, 0)), float(mixer.getTrackPeaks(t, 1)))
+
+
+def cmd_track_peaks(args):
+    tracks = args.get("tracks")
+    if tracks is None:
+        tracks = list(range(mixer.trackCount()))
+    for t in tracks:
+        _check_track(t)
+    return {
+        "playing": bool(transport.isPlaying()),
+        "peaks": [{"index": t, "name": mixer.getTrackName(t), "peak": round(_track_peak(t), 4)}
+                  for t in tracks],
+    }
 
 
 # Operations cmd_batch may perform.  Still a whitelist: the op name selects
@@ -532,6 +832,11 @@ COMMANDS = {
     "set_mixer_track_pan": cmd_set_mixer_track_pan,
     "set_mixer_track_mute": cmd_set_mixer_track_mute,
     "set_mixer_track_solo": cmd_set_mixer_track_solo,
+    "set_mixer_route": cmd_set_mixer_route,
+    "create_bus": cmd_create_bus,
+    "list_plugin_params": cmd_list_plugin_params,
+    "set_plugin_param": cmd_set_plugin_param,
+    "track_peaks": cmd_track_peaks,
     "batch": cmd_batch,
 }
 

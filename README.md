@@ -124,22 +124,51 @@ should return the FL version.
 | `fl_ping`                      | read-only  | API version (`general.getVersion`), full FL version string, indexing mode    |
 | `get_project_info`             | read-only  | tempo, title, channel / pattern / mixer-track counts                         |
 | `list_channels`                | read-only  | index, name, `#RRGGBB`, type, plugin, target mixer track                     |
-| `list_mixer_tracks`            | read-only  | index, name, colour, volume, pan, effect slots; `include_empty` to show all  |
+| `list_mixer_tracks`            | read-only  | index, name, colour, volume, pan, mute/solo, routes, `fed_by` (bus sources), effect slots; `include_empty` to show all |
 | `rename_channel`               | mutating   | `index`, `name`                                                              |
 | `set_channel_color`            | mutating   | `index`, `color` (`#RRGGBB`)                                                 |
 | `route_channel_to_mixer`       | mutating   | `index`, `track`                                                             |
 | `rename_mixer_track`           | mutating   | `index`, `name`                                                              |
 | `set_mixer_track_color`        | mutating   | `index`, `color`                                                             |
 | `set_tempo`                    | mutating   | `bpm` 10–522, via `REC_Tempo`                                                |
-| `set_mixer_track_volume`       | mutating   | `index`, exactly one of `volume` (0–1, 0.8 = 0 dB) or `volume_db`            |
+| `set_mixer_track_volume`       | mutating   | `index`, exactly one of `volume` (0–1, 0.8 = 0 dB) or `volume_db` (max +5.59) |
 | `set_mixer_track_pan`          | mutating   | `index`, `pan` -1..1                                                         |
 | `set_mixer_track_mute`         | mutating   | `index`, `muted`                                                             |
 | `set_mixer_track_solo`         | mutating   | `index`, `solo` (FL clears the track's mute when it is soloed)               |
+| `set_mixer_route`              | mutating   | `source`, `dest`, `enabled` (default `true`), optional send `level` 0–1      |
+| `create_bus`                   | mutating   | `bus`, `sources` list, optional `name`/`color`, `keep_master`; one undo step |
+| `list_plugin_params`           | read-only  | `track`+`slot` or `channel`; name, value 0–1 and the plugin's text per param; `filter`, `max_params` |
+| `set_plugin_param`             | mutating   | `param` (index or name), `value` 0–1, `track`+`slot` or `channel`           |
+| `get_track_levels`             | read-only  | polls `getTrackPeaks` for `duration_s` while FL plays; peak/avg in dBFS     |
+| `analyze_stems`                | read-only  | FFT of exported stem WAVs in `folder`: band energy, peaks, clashes (server-side, no FL call) |
 | `apply_organization_template`  | mutating   | `template` (JSON), `dry_run` (default `true`)                                |
+
+`volume_db` is converted with FL's fader law, fitted on 24.2.2:
+`amplitude = (e^(3v) - 1) / (e^(2.4) - 1)`, so `v = 0.8` is 0 dB and `v = 1`
+is +5.59 dB. The reply carries `set` (what was written) next to `to` (what FL
+read back). On some tracks FL applies the fader on its next tick, so if
+`readback_stale` is true trust `set` and re-read with `list_mixer_tracks`.
 
 Every mutating tool creates an undo point named `FLMCP: ...` inside FL
 **before** changing anything, so Ctrl+Z reverts it. A template application is
 one undo point for the whole batch. Read-only tools never call a setter.
+
+### Mixing workflow
+
+The scripting API exposes no audio, so "what frequencies are on this track" is
+answered offline:
+
+1. In FL: File > Export > WAV, tick **Split mixer tracks**, export a short loop
+   where everything plays. One WAV per mixer track lands in the folder.
+2. `analyze_stems(folder=...)` reports each stem's energy per band, its top
+   spectral peaks, and *clashes* (two stems both leaning on the same band).
+3. Act on it through FL: `get_track_levels` while playing for balance,
+   `set_mixer_track_volume` / `set_mixer_track_pan`, `create_bus`, and
+   `list_plugin_params` + `set_plugin_param` to move EQ bands on a Fruity
+   Parametric EQ 2 you have loaded (plugins cannot be loaded by script).
+
+Plugin values are FL's normalised 0–1; the reply's `value_string` shows the
+plugin's own readout, so iterate towards a target like "200 Hz".
 
 ### Template format
 

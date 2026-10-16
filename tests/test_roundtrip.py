@@ -131,7 +131,10 @@ def test_mixer_volume_pan_mute_solo(fl):
     r = roundtrip(project, ctrl, "set_mixer_track_volume", {"index": 3, "volume": 0.5})["result"]
     assert r["from"]["volume"] == 0.8 and r["to"]["volume"] == 0.5
     r = roundtrip(project, ctrl, "set_mixer_track_volume", {"index": 3, "volume_db": -6.0})["result"]
-    assert abs(r["to"]["volume_db"] - -6.0) < 0.05
+    assert abs(r["to"]["volume_db"] - -6.0) < 0.01 and r["set"] == {"volume": 0.5986, "volume_db": -6.0}   # FL's own bisection gave 0.5984; same dB
+    assert r["readback_stale"] is False
+    r = roundtrip(project, ctrl, "set_mixer_track_volume", {"index": 3, "volume": 0})["result"]
+    assert r["to"]["volume_db"] is None and r["set"]["volume_db"] is None   # silence, not -inf
     bad = roundtrip(project, ctrl, "set_mixer_track_volume", {"index": 3, "volume_db": 20})
     assert not bad["ok"] and "maximum" in bad["error"]
     assert not roundtrip(project, ctrl, "set_mixer_track_volume", {"index": 3})["ok"]
@@ -140,8 +143,109 @@ def test_mixer_volume_pan_mute_solo(fl):
     assert roundtrip(project, ctrl, "set_mixer_track_mute", {"index": 3, "muted": True})["result"]["to"]["muted"]
     # idempotent: muting an already-muted track must not toggle it back
     assert roundtrip(project, ctrl, "set_mixer_track_mute", {"index": 3, "muted": True})["result"]["to"]["muted"]
+    assert project.tracks[3]["muted"] is True
     assert roundtrip(project, ctrl, "set_mixer_track_solo", {"index": 3, "solo": True})["result"]["to"]["solo"]
     assert not roundtrip(project, ctrl, "set_mixer_track_solo", {"index": 3, "solo": False})["result"]["to"]["solo"]
+    listed = roundtrip(project, ctrl, "list_mixer_tracks", {"include_empty": True})["result"]["tracks"][3]
+    assert listed["muted"] is True and listed["solo"] is False
+    assert listed["routes"] == [{"to": 0, "level": 0.8}]
+
+
+def test_fader_law_matches_fl_24_2_2(fl):
+    """Fader values and dB readouts measured on real FL Studio 24.2.2."""
+    _, ctrl = fl
+    measured = {0.8: 0.0, 1.0: 5.59, 0.5984: -6.0, 0.5357: -8.0, 0.5054: -9.0, 0.4758: -10.0,
+                0.4471: -11.0, 0.4191: -12.0, 0.366: -14.0, 0.6464: -4.52, 0.8328: 0.94}
+    for v, db in measured.items():
+        assert abs(ctrl.fader_to_db(v) - db) < 0.02, (v, db, ctrl.fader_to_db(v))
+        assert abs(ctrl.db_to_fader(db) - v) < 0.0006, (v, db, ctrl.db_to_fader(db))
+    assert ctrl.fader_to_db(0) is None
+    assert abs(ctrl.FADER_MAX_DB - 5.59) < 0.01
+
+
+def test_mixer_routing_and_bus(fl):
+    project, ctrl = fl
+    r = roundtrip(project, ctrl, "set_mixer_route", {"source": 2, "dest": 20, "level": 0.5})["result"]
+    assert r["routes_before"] == [{"to": 0, "level": 0.8}]
+    assert r["routes_after"] == [{"to": 0, "level": 0.8}, {"to": 20, "level": 0.5}]
+    assert project.routing_notified == 1
+    r = roundtrip(project, ctrl, "set_mixer_route", {"source": 2, "dest": 0, "enabled": False})["result"]
+    assert r["routes_after"] == [{"to": 20, "level": 0.5}]
+    for bad in ({"source": 0, "dest": 3}, {"source": 3, "dest": 3}, {"source": 3, "dest": 4, "level": 2}):
+        assert not roundtrip(project, ctrl, "set_mixer_route", bad)["ok"]
+
+    r = roundtrip(project, ctrl, "create_bus",
+                  {"bus": 30, "sources": [1, 3], "name": "Drums", "color": "#E74C3C"})["result"]
+    assert r["routes"] == {"1": [{"to": 30, "level": 0.8}], "3": [{"to": 30, "level": 0.8}]}
+    assert r["bus_routes"] == [{"to": 0, "level": 0.8}]          # the bus still feeds Master
+    assert project.tracks[30]["name"] == "Drums" and project.tracks[30]["color"] == 0xE74C3C
+    assert project.undo_log[-1] == "FLMCP: create bus on mixer track 30"   # one undo point
+    # the bus has no effects and no channels, but it is fed by tracks, so it is listed
+    listed = {t["index"]: t for t in roundtrip(project, ctrl, "list_mixer_tracks")["result"]["tracks"]}
+    assert listed[30]["fed_by"] == [1, 3] and listed[1]["fed_by"] == []
+    assert 20 in listed and listed[20]["fed_by"] == [2]
+    r = roundtrip(project, ctrl, "create_bus", {"bus": 31, "sources": [4], "keep_master": True})["result"]
+    assert r["routes"]["4"] == [{"to": 0, "level": 0.8}, {"to": 31, "level": 0.8}]
+    for bad in ({"bus": 0, "sources": [1]}, {"bus": 5, "sources": [5]}, {"bus": 5, "sources": []},
+                {"bus": 5, "sources": [1, 1]}, {"bus": 5, "sources": [1], "color": "red"}):
+        assert not roundtrip(project, ctrl, "create_bus", bad)["ok"]
+
+
+def test_plugin_params(fl):
+    project, ctrl = fl
+    r = roundtrip(project, ctrl, "list_plugin_params", {"track": 1, "slot": 0})["result"]
+    assert r["plugin"] == "Fruity Limiter" and r["param_count"] == 3 and not r["truncated"]
+    assert [p["index"] for p in r["params"]] == [0, 2]            # unnamed slot skipped
+    assert r["params"][0] == {"index": 0, "name": "Gain", "value": 0.5, "value_string": "50%"}
+    r = roundtrip(project, ctrl, "list_plugin_params", {"track": 1, "slot": 0, "filter": "FREQ"})["result"]
+    assert [p["name"] for p in r["params"]] == ["Freq"]
+    r = roundtrip(project, ctrl, "list_plugin_params", {"track": 1, "slot": 0, "max_params": 1})["result"]
+    assert len(r["params"]) == 1 and r["truncated"]
+    r = roundtrip(project, ctrl, "list_plugin_params", {"channel": 2})["result"]
+    assert r["plugin"] == "Serum" and r["channel"] == 2
+    for bad in ({"track": 1, "slot": 3}, {"channel": 0}, {"channel": 2, "track": 1, "slot": 0},
+                {"track": 1, "slot": 10}):
+        assert not roundtrip(project, ctrl, "list_plugin_params", bad)["ok"]
+
+    r = roundtrip(project, ctrl, "set_plugin_param", {"track": 1, "slot": 0, "param": "gain", "value": 0.75})["result"]
+    assert r["param"] == 0 and r["from"]["value"] == 0.5 and r["to"] == {"value": 0.75, "value_string": "75%"}
+    assert r["readback_stale"] is False
+    assert project.params[(1, 0)][0]["value"] == 0.75
+    r = roundtrip(project, ctrl, "set_plugin_param", {"track": 1, "slot": 0, "param": 2, "value": 0})["result"]
+    assert r["name"] == "Freq" and r["to"]["value"] == 0
+    assert project.undo_log[-1] == "FLMCP: set Freq on Fruity Limiter"
+    for bad in ({"param": "nope", "value": 0.5}, {"param": 0, "value": 2}, {"param": 7, "value": 0.5},
+                {"param": "", "value": 0.5}):
+        bad.update(track=1, slot=0)
+        assert not roundtrip(project, ctrl, "set_plugin_param", bad)["ok"]
+    assert len(project.undo_log) == 2
+
+
+def test_track_peaks(fl):
+    project, ctrl = fl
+    project.tracks[1]["peak"] = 0.9
+    project.playing = True
+    r = roundtrip(project, ctrl, "track_peaks", {"tracks": [0, 1]})["result"]
+    assert r["playing"] is True
+    assert r["peaks"] == [{"index": 0, "name": "Master", "peak": 0.0}, {"index": 1, "name": "Insert 1", "peak": 0.9}]
+    assert len(roundtrip(project, ctrl, "track_peaks")["result"]["peaks"]) == 127
+    assert not roundtrip(project, ctrl, "track_peaks", {"tracks": [200]})["ok"]
+    assert project.undo_log == []                 # metering is read-only
+
+
+def test_get_track_levels_aggregates(monkeypatch):
+    from fl_mcp import server
+    snaps = iter([
+        {"playing": False, "peaks": [{"index": 0, "name": "Master", "peak": 0.5}, {"index": 1, "name": "kick", "peak": 0.0}]},
+        {"playing": True, "peaks": [{"index": 0, "name": "Master", "peak": 1.2}, {"index": 1, "name": "kick", "peak": 0.0}]},
+    ])
+    monkeypatch.setattr(server, "_call", lambda cmd, **a: next(snaps))
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+    fn = getattr(server.get_track_levels, "fn", server.get_track_levels)   # FunctionTool or plain fn
+    r = fn(duration_s=0.2, interval_s=0.1)
+    assert r["playing"] is True and r["samples"] == 2
+    assert r["tracks"] == [{"index": 0, "name": "Master", "peak": 1.2, "peak_db": 1.58,
+                            "avg": 0.85, "avg_db": -1.41, "clipping": True}]   # silent kick dropped
 
 
 def test_errors_are_clean(fl):
@@ -207,8 +311,11 @@ def test_server_registers_expected_tools():
                           "rename_mixer_track", "set_mixer_track_color", "set_tempo",
                           "set_mixer_track_volume", "set_mixer_track_pan",
                           "set_mixer_track_mute", "set_mixer_track_solo",
+                          "set_mixer_route", "create_bus",
+                          "list_plugin_params", "set_plugin_param", "get_track_levels", "analyze_stems",
                           "apply_organization_template"}
-    ro = {"fl_ping", "get_project_info", "list_channels", "list_mixer_tracks"}
+    ro = {"fl_ping", "get_project_info", "list_channels", "list_mixer_tracks",
+          "list_plugin_params", "get_track_levels", "analyze_stems"}
     for name, t in tools.items():
         ann = t.annotations
         if isinstance(ann, dict):

@@ -73,7 +73,8 @@ shows an entry named `FLMCP: ...`, press Ctrl+Z, confirm the change reverted.
 - [ ] `rename_mixer_track(index=12, name="TEST track")`
 - [ ] `set_tempo(bpm=128.5)` (transport shows 128.500)
 - [ ] `set_mixer_track_volume(index=12, volume_db=-6)` moves the fader to
-      about -6 dB (`volume_db` in the reply; verified -6.00 on 24.2.2).
+      -6 dB (`set.volume` 0.5986). If `readback_stale` is true in the reply,
+      `list_mixer_tracks` a moment later must still show -6 dB.
 - [ ] `set_mixer_track_pan(index=12, pan=-0.5)` pans halfway left.
 - [ ] `set_mixer_track_mute(index=12, muted=true)` then `muted=false`; calling
       `muted=true` twice leaves it muted.
@@ -81,6 +82,30 @@ shows an entry named `FLMCP: ...`, press Ctrl+Z, confirm the change reverted.
       un-mutes a track when it is soloed.
 - [ ] `set_mixer_track_volume(index=12, volume_db=20)`: "above FL's fader
       maximum" error and the fader is left where it was.
+- [ ] `set_mixer_route(source=12, dest=13, level=0.5)`: in the mixer, select
+      track 12 and the send arrow under track 13 lights up at about -6 dB;
+      `routes_after` lists both 0 and 13.
+- [ ] `set_mixer_route(source=12, dest=0, enabled=false)`: track 12 no longer
+      feeds Master (its send arrow under Master goes off).
+- [ ] `create_bus(bus=14, sources=[12, 13], name="TEST bus", color="#00FF00")`:
+      tracks 12 and 13 now send only to 14, 14 still sends to Master, 14 is
+      renamed and green, and the undo history has ONE new entry.
+      `create_bus(..., keep_master=true)` leaves the Master sends in place.
+- [ ] Load Fruity Parametric EQ 2 into slot 0 of track 12, then
+      `list_plugin_params(track=12, slot=0)`: band names/values match the
+      plugin window; `value_string` shows Hz / dB text (note which, if any,
+      come back as null; `getParamValueString` is not supported by every plugin).
+- [ ] `set_plugin_param(track=12, slot=0, param="<a band Freq name>", value=0.5)`:
+      the knob moves on screen, the reply's `to.value_string` matches, Ctrl+Z
+      reverts it.
+- [ ] `list_plugin_params(channel=<index of a FLEX/Sytrus channel>)` works with
+      the channel form.
+- [ ] Press Play, then `get_track_levels(duration_s=2)`: `playing=true`, the
+      tracks with sound appear loudest-first with sensible dBFS; with transport
+      stopped every track is omitted (silent).
+- [ ] Export stems (File > Export > WAV, Split mixer tracks) to a folder and run
+      `analyze_stems(folder=...)`: one entry per WAV, kick/bass stems dominant in
+      sub/bass, hats in presence/air; `errors` is empty.
 
 If Ctrl+Z does **not** revert a change but the history entry exists, open
 `device_FLMCP.py`, change `UNDO_FLAGS = midi.UF_None` to

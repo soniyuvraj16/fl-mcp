@@ -19,12 +19,15 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sys
+import time
 from typing import Any
 
 from fastmcp import FastMCP
 
 from .midi_bridge import FLBridge, FLCommandError, FLConnectionError, get_bridge
+from .stems import analyze_folder
 from .templates import normalise_hex, plan, strip_plan_metadata
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="fl-mcp %(levelname)s: %(message)s")
@@ -83,10 +86,75 @@ def list_channels() -> dict:
 @mcp.tool(annotations=READ_ONLY)
 def list_mixer_tracks(include_empty: bool = False) -> dict:
     """List mixer tracks: index, name, colour, volume (0-1 and dB), pan (-1..1),
-    how many channels route to it, and the plugin in each effect slot.
+    mute/solo state, how many channels route to it, which tracks it sends to
+    (routes, with send levels), and the plugin in each effect slot.
     Tracks with no effects and no routed channels are skipped unless
     include_empty=true. Track 0 is Master and is always included."""
     return _call("list_mixer_tracks", include_empty=include_empty)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def list_plugin_params(track: int | None = None, slot: int | None = None, channel: int | None = None,
+                       filter: str | None = None, max_params: int = 200) -> dict:
+    """List a plugin's parameters: index, name, value (FL-normalised 0-1) and the
+    plugin's own text for it (e.g. "200 Hz", "-3.0 dB"). Target a mixer effect
+    with track + slot (slot 0-9, see list_mixer_tracks) or an instrument with
+    channel. filter keeps names containing that text; VSTs can expose thousands
+    of parameters so max_params caps the reply (truncated=true when it bites)."""
+    return _call("list_plugin_params", track=track, slot=slot, channel=channel,
+                 filter=filter, max_params=max_params)
+
+
+def _db(x: float) -> float | None:
+    return None if x <= 0 else round(20 * math.log10(x), 2)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def get_track_levels(duration_s: float = 2.0, interval_s: float = 0.1,
+                     tracks: list[int] | None = None) -> dict:
+    """Meter the mixer while FL is playing: samples every track's peak level
+    for duration_s (max 30) and returns per-track peak and average, as 0-1 and
+    dBFS (1.0 = 0 dBFS, >1 = clipping), loudest first. Silent tracks are
+    omitted unless listed in tracks. Press Play in FL first; `playing` says
+    whether transport was running."""
+    duration_s = max(0.0, min(float(duration_s), 30.0))
+    interval_s = max(0.05, float(interval_s))
+    n = max(1, int(round(duration_s / interval_s)))
+    samples: dict[int, list[float]] = {}
+    names: dict[int, str] = {}
+    playing = False
+    for i in range(n):
+        snap = _call("track_peaks", tracks=tracks)
+        playing = playing or bool(snap.get("playing"))
+        for p in snap["peaks"]:
+            samples.setdefault(p["index"], []).append(p["peak"])
+            names[p["index"]] = p["name"]
+        if i < n - 1:
+            time.sleep(interval_s)
+    out = []
+    for t, vs in samples.items():
+        mx, avg = max(vs), sum(vs) / len(vs)
+        if mx <= 0 and tracks is None:
+            continue
+        out.append({"index": t, "name": names[t], "peak": round(mx, 4), "peak_db": _db(mx),
+                    "avg": round(avg, 4), "avg_db": _db(avg), "clipping": mx > 1.0})
+    out.sort(key=lambda r: -r["peak"])
+    return {"playing": playing, "samples": n, "tracks": out}
+
+
+@mcp.tool(annotations=READ_ONLY)
+def analyze_stems(folder: str, max_seconds: float = 60.0, top: int = 3) -> dict:
+    """Frequency analysis of exported stems (FL cannot expose audio, so export
+    with File > Export > WAV, "Split mixer tracks", then point this at the
+    folder). For each WAV: peak/RMS dBFS, energy share per band (sub, bass,
+    low_mid, mid, high_mid, presence, air), spectral centroid and the top
+    spectral peaks. Also lists clashes: pairs of stems that both put a large
+    share of their energy in the same band. Only the first max_seconds of each
+    file are read."""
+    try:
+        return analyze_folder(folder, max_seconds=max_seconds, top=top)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(str(e)) from None
 
 
 # --------------------------------------------------------------------------
@@ -155,6 +223,37 @@ def set_mixer_track_mute(index: int, muted: bool) -> dict:
 def set_mixer_track_solo(index: int, solo: bool) -> dict:
     """Solo or unsolo a mixer track."""
     return _call("set_mixer_track_solo", index=index, solo=solo)
+
+
+@mcp.tool(annotations=MUTATING)
+def set_mixer_route(source: int, dest: int, enabled: bool = True, level: float | None = None) -> dict:
+    """Route (enabled=true) or un-route one mixer track into another. Every
+    insert sends to Master (0) by default; to move it onto a bus, route it to
+    the bus and un-route it from Master (or use create_bus). level is the
+    optional send level 0-1 (0.8 = 0 dB). Returns the source's routes before
+    and after."""
+    return _call("set_mixer_route", source=source, dest=dest, enabled=enabled, level=level)
+
+
+@mcp.tool(annotations=MUTATING)
+def create_bus(bus: int, sources: list[int], name: str | None = None, color: str | None = None,
+               keep_master: bool = False) -> dict:
+    """Turn mixer track `bus` into a bus fed by `sources`, as one undo step:
+    each source is routed to the bus and its direct send to Master removed
+    (keep_master=true leaves it in parallel). Optionally names and colours the
+    bus. The bus itself still goes to Master."""
+    return _call("create_bus", bus=bus, sources=sources, name=name,
+                 color=None if color is None else normalise_hex(color), keep_master=keep_master)
+
+
+@mcp.tool(annotations=MUTATING)
+def set_plugin_param(param: int | str, value: float, track: int | None = None,
+                     slot: int | None = None, channel: int | None = None) -> dict:
+    """Set one plugin parameter. param is the index from list_plugin_params or
+    its name (exact, or a unique substring). value is FL-normalised 0-1; the
+    reply's value_string shows what the plugin made of it, so adjust and call
+    again to hit a target like "200 Hz". Target with track + slot or channel."""
+    return _call("set_plugin_param", param=param, value=value, track=track, slot=slot, channel=channel)
 
 
 @mcp.tool(annotations=MUTATING)

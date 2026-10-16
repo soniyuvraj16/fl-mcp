@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import math
 import types
 from pathlib import Path
 
@@ -32,9 +33,14 @@ class FakeProject:
         ]
         self.tracks = [
             {"name": "Master" if t == 0 else f"Insert {t}", "color": 0x808080,
-             "volume": 0.8, "pan": 0.0, "fx": [None] * 10}
+             "volume": 0.8, "pan": 0.0, "fx": [None] * 10,
+             # routes: dest -> send level; every insert sends to Master by default
+             "routes": {} if t == 0 else {0: 0.8}}
             for t in range(n_tracks)
         ]
+        self.routing_notified = 0
+        self.params: dict[tuple[int, int], list[dict]] = {}
+        self.playing = False
         self.sent: list[bytes] = []        # SysEx the controller emitted
 
 
@@ -92,15 +98,38 @@ def build_modules(project: FakeProject) -> dict[str, types.ModuleType]:
     mx.setTrackName = lambda t, n: project.tracks[t].__setitem__("name", n)
     mx.getTrackColor = lambda t: project.tracks[t]["color"]
     mx.setTrackColor = lambda t, c: project.tracks[t].__setitem__("color", c)
-    # dB readout: monotonic stand-in for FL's fader law (0.8 -> 0 dB, 1.0 -> +5.6 dB).
-    mx.getTrackVolume = lambda t, mode=0: project.tracks[t]["volume"] if mode == 0 else (project.tracks[t]["volume"] - 0.8) * 28.0
+    # dB readout uses FL's real fader law (fitted on 24.2.2, see the controller):
+    # amplitude = (e^(3v) - 1) / (e^(2.4) - 1); 0.8 -> 0 dB, 1.0 -> +5.59 dB, 0 -> -inf.
+    def _db(v):
+        return -math.inf if v <= 0 else 20.0 * math.log10((math.exp(3.0 * v) - 1.0) / (math.exp(2.4) - 1.0))
+    mx.getTrackVolume = lambda t, mode=0: project.tracks[t]["volume"] if mode == 0 else _db(project.tracks[t]["volume"])
     mx.setTrackVolume = lambda t, v: project.tracks[t].__setitem__("volume", v)
     mx.getTrackPan = lambda t: project.tracks[t]["pan"]
     mx.setTrackPan = lambda t, p: project.tracks[t].__setitem__("pan", p)
+    def _toggle_or_set(key):
+        def fn(t, value=-1, mode=-1):
+            cur = project.tracks[t].get(key, False)
+            project.tracks[t][key] = (not cur) if value == -1 else bool(value)
+        return fn
     mx.isTrackMuted = lambda t: project.tracks[t].get("muted", False)
-    mx.muteTrack = lambda t: project.tracks[t].__setitem__("muted", not project.tracks[t].get("muted", False))
+    mx.muteTrack = _toggle_or_set("muted")
     mx.isTrackSolo = lambda t: project.tracks[t].get("solo", False)
-    mx.soloTrack = lambda t: project.tracks[t].__setitem__("solo", not project.tracks[t].get("solo", False))
+    mx.soloTrack = _toggle_or_set("solo")
+
+    def setRouteTo(i, d, value, updateUI=False):
+        routes = project.tracks[i]["routes"]
+        if value:
+            routes.setdefault(d, 0.8)
+        else:
+            routes.pop(d, None)
+    mx.setRouteTo = setRouteTo
+    mx.getRouteSendActive = lambda i, d: d in project.tracks[i]["routes"]
+    mx.setRouteToLevel = lambda i, d, l: project.tracks[i]["routes"].__setitem__(d, l)
+    mx.getRouteToLevel = lambda i, d: project.tracks[i]["routes"].get(d, 0.0)
+    def afterRoutingChanged():
+        project.routing_notified += 1
+    mx.afterRoutingChanged = afterRoutingChanged
+    mx.getTrackPeaks = lambda t, mode: project.tracks[t].get("peak", 0.0)
     m["mixer"] = mx
 
     # --- patterns ---------------------------------------------------------
@@ -120,9 +149,30 @@ def build_modules(project: FakeProject) -> dict[str, types.ModuleType]:
         if slot == -1:
             return project.channels[index]["plugin"]
         return project.tracks[index]["fx"][slot]
+
+    # Parameters live in project.params[(index, slot)] as [{"name", "value"}].
+    # A valid plugin with no entry gets three generic ones; name "" mimics the
+    # unused slots VSTs report.
+    def _params(index, slot):
+        key = (index, slot)
+        if key not in project.params:
+            project.params[key] = [{"name": "Gain", "value": 0.5}, {"name": "", "value": 0.0},
+                                   {"name": "Freq", "value": 0.25}]
+        return project.params[key]
+
     pl.isValid = isValid
     pl.getPluginName = getPluginName
+    pl.getParamCount = lambda index, slot=-1, g=False: len(_params(index, slot))
+    pl.getParamName = lambda p, index, slot=-1, g=False: _params(index, slot)[p]["name"]
+    pl.getParamValue = lambda p, index, slot=-1, g=False: _params(index, slot)[p]["value"]
+    pl.setParamValue = lambda v, p, index, slot=-1, pickup=0, g=False: _params(index, slot)[p].__setitem__("value", v)
+    pl.getParamValueString = lambda p, index, slot=-1, pickup=0, g=False: "%d%%" % round(100 * _params(index, slot)[p]["value"])
     m["plugins"] = pl
+
+    # --- transport -------------------------------------------------------
+    tr = types.ModuleType("transport")
+    tr.isPlaying = lambda: project.playing
+    m["transport"] = tr
 
     # --- ui ---------------------------------------------------------------
     ui = types.ModuleType("ui")
