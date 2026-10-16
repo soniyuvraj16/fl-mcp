@@ -72,6 +72,15 @@ shows an entry named `FLMCP: ...`, press Ctrl+Z, confirm the change reverted.
 - [ ] `route_channel_to_mixer(index=0, track=12)` (channel button shows 12)
 - [ ] `rename_mixer_track(index=12, name="TEST track")`
 - [ ] `set_tempo(bpm=128.5)` (transport shows 128.500)
+- [ ] `set_mixer_track_volume(index=12, volume_db=-6)` moves the fader to
+      about -6 dB (`volume_db` in the reply; verified -6.00 on 24.2.2).
+- [ ] `set_mixer_track_pan(index=12, pan=-0.5)` pans halfway left.
+- [ ] `set_mixer_track_mute(index=12, muted=true)` then `muted=false`; calling
+      `muted=true` twice leaves it muted.
+- [ ] `set_mixer_track_solo(index=12, solo=true)` then `solo=false`. Note FL
+      un-mutes a track when it is soloed.
+- [ ] `set_mixer_track_volume(index=12, volume_db=20)`: "above FL's fader
+      maximum" error and the fader is left where it was.
 
 If Ctrl+Z does **not** revert a change but the history entry exists, open
 `device_FLMCP.py`, change `UNDO_FLAGS = midi.UF_None` to
@@ -84,10 +93,6 @@ If Ctrl+Z does **not** revert a change but the history entry exists, open
       order: set `COLOR_ORDER = "RGB"` in `device_FLMCP.py`, reload, repeat.
 - [ ] `list_channels` now reports `#FF0000` for channel 0.
 - [ ] `set_mixer_track_color(index=12, color="#00FF00")` turns the track green.
-- [ ] `set_mixer_track_volume(index=12, volume_db=-6)` moves the fader to about -6 dB (check the readout, `volume_db` in the reply).
-- [ ] `set_mixer_track_pan(index=12, pan=-0.5)` pans halfway left.
-- [ ] `set_mixer_track_mute(index=12, muted=true)` then `muted=false`; calling `muted=true` twice leaves it muted.
-- [ ] `set_mixer_track_solo(index=12, solo=true)` then `solo=false`.
 - [ ] Ctrl+Z twice reverts both.
 
 ## 7. Organisation template

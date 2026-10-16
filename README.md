@@ -134,7 +134,7 @@ should return the FL version.
 | `set_mixer_track_volume`       | mutating   | `index`, exactly one of `volume` (0–1, 0.8 = 0 dB) or `volume_db`            |
 | `set_mixer_track_pan`          | mutating   | `index`, `pan` -1..1                                                         |
 | `set_mixer_track_mute`         | mutating   | `index`, `muted`                                                             |
-| `set_mixer_track_solo`         | mutating   | `index`, `solo`                                                              |
+| `set_mixer_track_solo`         | mutating   | `index`, `solo` (FL clears the track's mute when it is soloed)               |
 | `apply_organization_template`  | mutating   | `template` (JSON), `dry_run` (default `true`)                                |
 
 Every mutating tool creates an undo point named `FLMCP: ...` inside FL
