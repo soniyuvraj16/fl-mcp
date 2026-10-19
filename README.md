@@ -189,6 +189,13 @@ Then act on it through FL: `get_track_levels` while playing for balance,
 Plugin values are FL's normalised 0–1; the reply's `value_string` shows the
 plugin's own readout, so iterate towards a target like "200 Hz".
 
+Fruity Parametric EQ 2 maps (measured on 24.2.2, so you can set a target
+directly instead of iterating): `Band N freq` is `20 Hz * 2^(10 v)`, i.e.
+`v = log2(Hz / 20) / 10`; `Band N level` is 36 dB across the range with `0.5`
+= 0 dB, i.e. `v = 0.5 + dB / 36`; `Band N type` steps through Disabled, Low
+pass, Band pass, High pass, Notch, Low shelf, Peaking, High shelf as
+`v = k / 7`; `Band N order` 0.5 is slope "2", 0 is "Steep 8".
+
 ### Template format
 
 ```json
