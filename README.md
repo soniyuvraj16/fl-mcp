@@ -196,6 +196,12 @@ directly instead of iterating): `Band N freq` is `20 Hz * 2^(10 v)`, i.e.
 pass, Band pass, High pass, Notch, Low shelf, Peaking, High shelf as
 `v = k / 7`; `Band N order` 0.5 is slope "2", 0 is "Steep 8".
 
+Some plugins update their readout lazily: Fruity Delay 3's `value_string`
+in a `set_plugin_param` reply can still show the previous value. Re-read it
+with `list_plugin_params` a moment later. Its `Time` (tempo-synced) is
+`steps / 16`, `Feedback cutoff` is exponential (0.68 is about 5 kHz) and
+`Delay time R/L offset` is `-100..100 %` across `0..1`.
+
 ### Template format
 
 ```json
