@@ -221,6 +221,26 @@ def test_plugin_params(fl):
     assert len(project.undo_log) == 2
 
 
+def test_playlist_tracks(fl):
+    project, ctrl = fl
+    r = roundtrip(project, ctrl, "list_playlist_tracks", {"limit": 3})["result"]
+    assert r["total_tracks"] == 500 and [t["index"] for t in r["tracks"]] == [1, 2, 3]
+    assert r["tracks"][0] == {"index": 1, "name": "Track 1", "color": "#808080", "muted": False, "solo": False}
+    r = roundtrip(project, ctrl, "set_playlist_track", {"index": 2, "name": "Kick", "color": "#E74C3C"})["result"]
+    assert r["renamed"] == {"index": 2, "from": "Track 2", "to": "Kick"} and r["colored"]["to"] == "#E74C3C"
+    assert project.undo_log[-1] == "FLMCP: set playlist track 2"
+    for bad in ({"index": 0, "name": "x"}, {"index": 501, "name": "x"}, {"index": 1}, {"index": 1, "color": "red"}):
+        assert not roundtrip(project, ctrl, "set_playlist_track", bad)["ok"]
+    ops = [{"op": "rename_playlist_track", "index": 5, "name": "Snare"},
+           {"op": "set_playlist_track_color", "index": 5, "color": "#00FF00"}]
+    r = roundtrip(project, ctrl, "batch", {"ops": ops, "label": "pl"})["result"]
+    assert r["applied"] == 2 and project.playlist_tracks[4] == {"name": "Snare", "color": 0x00FF00}
+    assert not roundtrip(project, ctrl, "batch", {"ops": [{"op": "rename_playlist_track", "index": 0, "name": "x"}]})["ok"]
+    # named tracks past the limit are still listed; default-named ones are not
+    listed = roundtrip(project, ctrl, "list_playlist_tracks", {"limit": 3})["result"]["tracks"]
+    assert [t["index"] for t in listed] == [1, 2, 3]
+
+
 def test_track_peaks(fl):
     project, ctrl = fl
     project.tracks[1]["peak"] = 0.9
@@ -384,9 +404,11 @@ def test_server_registers_expected_tools():
                           "set_mixer_route", "create_bus",
                           "list_plugin_params", "set_plugin_param", "get_track_levels", "analyze_stems",
                           "list_audio_devices", "analyze_live",
+                          "list_playlist_tracks", "set_playlist_track", "setup_playlist_tracks",
                           "apply_organization_template"}
     ro = {"fl_ping", "get_project_info", "list_channels", "list_mixer_tracks",
-          "list_plugin_params", "get_track_levels", "analyze_stems", "list_audio_devices"}
+          "list_plugin_params", "get_track_levels", "analyze_stems", "list_audio_devices",
+          "list_playlist_tracks"}
     for name, t in tools.items():
         ann = t.annotations
         if isinstance(ann, dict):

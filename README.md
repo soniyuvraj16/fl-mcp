@@ -143,6 +143,9 @@ should return the FL version.
 | `analyze_stems`                | read-only  | FFT of exported stem WAVs in `folder`: band energy, peaks, dynamics, clashes (server-side, no FL call) |
 | `list_audio_devices`           | read-only  | WASAPI loopback devices `analyze_live` can record from                      |
 | `analyze_live`                 | mutating*  | solo each track, record FL's output via loopback, same analysis as stems; captures and subtracts the bleed of channels routed straight to Master (`master_direct`, `above_bleed_db`); `tracks`, `seconds`, `device`. *flips solo/mute and restores them, no undo entries |
+| `list_playlist_tracks`         | read-only  | playlist tracks of the current arrangement (1-based): name, colour, mute/solo |
+| `set_playlist_track`           | mutating   | `index` (1-based), `name` and/or `color`                                     |
+| `setup_playlist_tracks`        | mutating   | `tracks` list of `{index, name, color}`; one undo step                        |
 | `apply_organization_template`  | mutating   | `template` (JSON), `dry_run` (default `true`)                                |
 
 `volume_db` is converted with FL's fader law, fitted on 24.2.2:

@@ -49,6 +49,7 @@ import general
 import midi
 import mixer
 import patterns
+import playlist
 import plugins
 import transport
 import ui
@@ -782,9 +783,71 @@ def cmd_track_peaks(args):
     }
 
 
+# ---------------------------------------------------------------------------
+# Playlist tracks (1-indexed in FL's API).  Only the current arrangement is
+# reachable; the API cannot switch arrangements.
+# ---------------------------------------------------------------------------
+
+def _check_playlist_track(index):
+    n = playlist.trackCount()
+    if not isinstance(index, int) or index < 1 or index > n:
+        raise ValueError("playlist track %r out of range 1..%d" % (index, n))
+
+
+def _playlist_track_state(i):
+    return {"index": i, "name": playlist.getTrackName(i), "color": color_to_hex(playlist.getTrackColor(i)),
+            "muted": bool(playlist.isTrackMuted(i)), "solo": bool(playlist.isTrackSolo(i))}
+
+
+def cmd_list_playlist_tracks(args):
+    n = playlist.trackCount()
+    limit = int(args.get("limit") or 50)
+    include_default = bool(args.get("include_default", False))
+    out = []
+    for i in range(1, n + 1):
+        st = _playlist_track_state(i)
+        if not include_default and st["name"] == "Track %d" % i and i > limit:
+            continue
+        out.append(st)
+        if len(out) >= limit and not include_default:
+            break
+    return {"tracks": out, "total_tracks": n}
+
+
+def _rename_playlist_track_apply(index, name):
+    before = playlist.getTrackName(index)
+    playlist.setTrackName(index, str(name))
+    return {"index": index, "from": before, "to": playlist.getTrackName(index)}
+
+
+def _set_playlist_track_color_apply(index, color):
+    before = playlist.getTrackColor(index)
+    playlist.setTrackColor(index, hex_to_color(color))
+    return {"index": index, "from": color_to_hex(before), "to": color_to_hex(playlist.getTrackColor(index))}
+
+
+def cmd_set_playlist_track(args):
+    index = args.get("index")
+    _check_playlist_track(index)
+    name, color = args.get("name"), args.get("color")
+    if name is None and color is None:
+        raise ValueError("give a name and/or a color")
+    if color is not None:
+        hex_to_color(color)
+    _mutating("set playlist track %s" % index)
+    out = {"index": index}
+    if name is not None:
+        out["renamed"] = _rename_playlist_track_apply(index, name)
+    if color is not None:
+        out["colored"] = _set_playlist_track_color_apply(index, color)
+    return out
+
+
 # Operations cmd_batch may perform.  Still a whitelist: the op name selects
 # one of the helpers above; nothing else is reachable.
 BATCH_OPS = {
+    "rename_playlist_track":    lambda op: _rename_playlist_track_apply(op["index"], op["name"]),
+    "set_playlist_track_color": lambda op: _set_playlist_track_color_apply(op["index"], op["color"]),
     "rename_channel":         lambda op: _rename_channel_apply(op["index"], op["name"]),
     "set_channel_color":      lambda op: _set_channel_color_apply(op["index"], op["color"]),
     "route_channel_to_mixer": lambda op: _route_channel_apply(op["index"], op["track"]),
@@ -792,6 +855,7 @@ BATCH_OPS = {
     "set_mixer_track_color":  lambda op: _set_track_color_apply(op["index"], op["color"]),
 }
 MIXER_OPS = ("rename_mixer_track", "set_mixer_track_color")
+PLAYLIST_OPS = ("rename_playlist_track", "set_playlist_track_color")
 
 
 def cmd_batch(args):
@@ -809,6 +873,8 @@ def cmd_batch(args):
             raise ValueError("op %d: unknown or missing op %r" % (n, kind))
         if kind in MIXER_OPS:
             _check_track(op.get("index"))
+        elif kind in PLAYLIST_OPS:
+            _check_playlist_track(op.get("index"))
         else:
             _check_channel(op.get("index"))
         if "track" in op:
@@ -849,6 +915,8 @@ COMMANDS = {
     "list_plugin_params": cmd_list_plugin_params,
     "set_plugin_param": cmd_set_plugin_param,
     "track_peaks": cmd_track_peaks,
+    "list_playlist_tracks": cmd_list_playlist_tracks,
+    "set_playlist_track": cmd_set_playlist_track,
     "batch": cmd_batch,
 }
 

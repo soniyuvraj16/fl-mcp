@@ -39,6 +39,7 @@ class FakeProject:
             for t in range(n_tracks)
         ]
         self.routing_notified = 0
+        self.playlist_tracks = [{"name": "Track %d" % (i + 1), "color": 0x808080} for i in range(500)]
         self.params: dict[tuple[int, int], list[dict]] = {}
         self.playing = False
         self.sent: list[bytes] = []        # SysEx the controller emitted
@@ -168,6 +169,17 @@ def build_modules(project: FakeProject) -> dict[str, types.ModuleType]:
     pl.setParamValue = lambda v, p, index, slot=-1, pickup=0, g=False: _params(index, slot)[p].__setitem__("value", v)
     pl.getParamValueString = lambda p, index, slot=-1, pickup=0, g=False: "%d%%" % round(100 * _params(index, slot)[p]["value"])
     m["plugins"] = pl
+
+    # --- playlist (1-indexed tracks) ---------------------------------------
+    pls = types.ModuleType("playlist")
+    pls.trackCount = lambda: len(project.playlist_tracks)
+    pls.getTrackName = lambda i: project.playlist_tracks[i - 1]["name"]
+    pls.setTrackName = lambda i, n: project.playlist_tracks[i - 1].__setitem__("name", n)
+    pls.getTrackColor = lambda i: project.playlist_tracks[i - 1]["color"]
+    pls.setTrackColor = lambda i, c: project.playlist_tracks[i - 1].__setitem__("color", c)
+    pls.isTrackMuted = lambda i: project.playlist_tracks[i - 1].get("muted", False)
+    pls.isTrackSolo = lambda i: project.playlist_tracks[i - 1].get("solo", False)
+    m["playlist"] = pls
 
     # --- transport -------------------------------------------------------
     tr = types.ModuleType("transport")

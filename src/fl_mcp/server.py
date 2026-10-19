@@ -95,6 +95,14 @@ def list_mixer_tracks(include_empty: bool = False) -> dict:
 
 
 @mcp.tool(annotations=READ_ONLY)
+def list_playlist_tracks(limit: int = 50, include_default: bool = False) -> dict:
+    """Playlist tracks of the CURRENT arrangement (FL cannot switch arrangements
+    by script): 1-based index, name, colour, mute and solo. Default-named
+    tracks beyond `limit` are skipped unless include_default=true."""
+    return _call("list_playlist_tracks", limit=limit, include_default=include_default)
+
+
+@mcp.tool(annotations=READ_ONLY)
 def list_plugin_params(track: int | None = None, slot: int | None = None, channel: int | None = None,
                        filter: str | None = None, max_params: int = 200) -> dict:
     """List a plugin's parameters: index, name, value (FL-normalised 0-1) and the
@@ -362,6 +370,30 @@ def create_bus(bus: int, sources: list[int], name: str | None = None, color: str
     bus. The bus itself still goes to Master."""
     return _call("create_bus", bus=bus, sources=sources, name=name,
                  color=None if color is None else normalise_hex(color), keep_master=keep_master)
+
+
+@mcp.tool(annotations=MUTATING)
+def set_playlist_track(index: int, name: str | None = None, color: str | None = None) -> dict:
+    """Rename and/or colour one playlist track (1-based) in the current arrangement."""
+    return _call("set_playlist_track", index=index, name=name,
+                 color=None if color is None else normalise_hex(color))
+
+
+@mcp.tool(annotations=MUTATING)
+def setup_playlist_tracks(tracks: list[dict]) -> dict:
+    """Name and colour several playlist tracks of the current arrangement as ONE
+    undo step. tracks = [{"index": 1, "name": "Kick", "color": "#E74C3C"}, ...];
+    index is 1-based, color optional."""
+    ops = []
+    for t in tracks:
+        i = int(t["index"])
+        if t.get("name") is not None:
+            ops.append({"op": "rename_playlist_track", "index": i, "name": str(t["name"])})
+        if t.get("color") is not None:
+            ops.append({"op": "set_playlist_track_color", "index": i, "color": normalise_hex(t["color"])})
+    if not ops:
+        raise RuntimeError("nothing to do: give at least one name or color")
+    return _call("batch", ops=ops, label="set up %d playlist tracks" % len(tracks))
 
 
 @mcp.tool(annotations=MUTATING)
