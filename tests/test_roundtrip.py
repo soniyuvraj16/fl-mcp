@@ -334,8 +334,19 @@ def test_get_track_levels_aggregates(monkeypatch):
     fn = getattr(server.get_track_levels, "fn", server.get_track_levels)   # FunctionTool or plain fn
     r = fn(duration_s=0.2, interval_s=0.1)
     assert r["playing"] is True and r["samples"] == 2
-    assert r["tracks"] == [{"index": 0, "name": "Master", "peak": 1.2, "peak_db": 1.58,
-                            "avg": 0.85, "avg_db": -1.41, "clipping": True}]   # silent kick dropped
+    assert r["tracks"] == [{"index": 0, "name": "Master", "peak": 1.2, "peak_db": server.meter_to_dbfs(1.2),
+                            "avg": 0.85, "avg_db": server.meter_to_dbfs(0.85), "clipping": True}]   # silent kick dropped
+
+
+def test_meter_scale_calibration():
+    from fl_mcp.server import meter_to_dbfs
+    # anchors measured on FL 24.2.2 (kick clip, sample peak -0.7 dBFS, fader stepped)
+    assert meter_to_dbfs(0.9798) == -0.7 and meter_to_dbfs(0.8027) == -6.7 and meter_to_dbfs(0.3272) == -24.7
+    assert abs(meter_to_dbfs(0.847) - (-5.2)) < 0.2          # between anchors
+    assert meter_to_dbfs(1.2) > 4.3 and meter_to_dbfs(0.2) < -24.7   # extrapolates both ways
+    assert meter_to_dbfs(0) is None
+    # six dB of fader is about 0.17 of meter, NOT a factor of two in the raw value
+    assert abs((meter_to_dbfs(0.8027) - meter_to_dbfs(0.6301)) - 6.0) < 0.01
 
 
 def test_errors_are_clean(fl):

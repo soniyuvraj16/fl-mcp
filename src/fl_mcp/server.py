@@ -114,18 +114,45 @@ def list_plugin_params(track: int | None = None, slot: int | None = None, channe
                  filter=filter, max_params=max_params)
 
 
+# mixer.getTrackPeaks does NOT return linear amplitude: it returns FL's meter
+# scale, which is close to linear in dB (about 1 + dBFS/34 above -25 dBFS).
+# Calibrated on FL Studio 24.2.2 by stepping a kick clip (sample peak -0.7
+# dBFS) through the fader from +5 to -24 dB and reading the peak value.
+_METER_TABLE = [  # (raw peak value, dBFS)
+    (0.3272, -24.7), (0.3962, -21.7), (0.4694, -18.7), (0.5488, -15.7), (0.6301, -12.7),
+    (0.7148, -9.7), (0.8027, -6.7), (0.8912, -3.7), (0.9798, -0.7), (1.1316, 4.3),
+]
+
+
+def meter_to_dbfs(raw: float) -> float | None:
+    """FL peak-meter value -> dBFS (None when the meter reads 0)."""
+    if raw <= 0:
+        return None
+    pts = _METER_TABLE
+    if raw <= pts[0][0]:
+        (r0, d0), (r1, d1) = pts[0], pts[1]
+    elif raw >= pts[-1][0]:
+        (r0, d0), (r1, d1) = pts[-2], pts[-1]
+    else:
+        for (r0, d0), (r1, d1) in zip(pts, pts[1:]):
+            if r0 <= raw <= r1:
+                break
+    return round(d0 + (raw - r0) * (d1 - d0) / (r1 - r0), 2)
+
+
 def _db(x: float) -> float | None:
-    return None if x <= 0 else round(20 * math.log10(x), 2)
+    return meter_to_dbfs(x)
 
 
 @mcp.tool(annotations=READ_ONLY)
 def get_track_levels(duration_s: float = 2.0, interval_s: float = 0.1,
                      tracks: list[int] | None = None) -> dict:
     """Meter the mixer while FL is playing: samples every track's peak level
-    for duration_s (max 30) and returns per-track peak and average, as 0-1 and
-    dBFS (1.0 = 0 dBFS, >1 = clipping), loudest first. Silent tracks are
-    omitted unless listed in tracks. Press Play in FL first; `playing` says
-    whether transport was running."""
+    for duration_s (max 30) and returns per-track peak and average as FL's raw
+    meter value and as dBFS (converted with a calibration of FL's meter scale,
+    which is roughly linear in dB, not amplitude; 1.0 is about 0 dBFS),
+    loudest first. Silent tracks are omitted unless listed in tracks. Press
+    Play in FL first; `playing` says whether transport was running."""
     duration_s = max(0.0, min(float(duration_s), 30.0))
     interval_s = max(0.05, float(interval_s))
     n = max(1, int(round(duration_s / interval_s)))
@@ -145,8 +172,9 @@ def get_track_levels(duration_s: float = 2.0, interval_s: float = 0.1,
         mx, avg = max(vs), sum(vs) / len(vs)
         if mx <= 0 and tracks is None:
             continue
-        out.append({"index": t, "name": names[t], "peak": round(mx, 4), "peak_db": _db(mx),
-                    "avg": round(avg, 4), "avg_db": _db(avg), "clipping": mx > 1.0})
+        pk_db = _db(mx)
+        out.append({"index": t, "name": names[t], "peak": round(mx, 4), "peak_db": pk_db,
+                    "avg": round(avg, 4), "avg_db": _db(avg), "clipping": pk_db is not None and pk_db > 0})
     out.sort(key=lambda r: -r["peak"])
     return {"playing": playing, "samples": n, "tracks": out}
 

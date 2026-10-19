@@ -139,7 +139,7 @@ should return the FL version.
 | `create_bus`                   | mutating   | `bus`, `sources` list, optional `name`/`color`, `keep_master`; one undo step |
 | `list_plugin_params`           | read-only  | `track`+`slot` or `channel`; name, value 0–1 and the plugin's text per param; `filter`, `max_params` |
 | `set_plugin_param`             | mutating   | `param` (index or name), `value` 0–1, `track`+`slot` or `channel`           |
-| `get_track_levels`             | read-only  | polls `getTrackPeaks` for `duration_s` while FL plays; peak/avg in dBFS     |
+| `get_track_levels`             | read-only  | polls `getTrackPeaks` for `duration_s` while FL plays; peak/avg in dBFS (FL's meter value is dB-linear, not amplitude; calibrated on 24.2.2) |
 | `analyze_stems`                | read-only  | FFT of exported stem WAVs in `folder`: band energy, peaks, dynamics, clashes (server-side, no FL call) |
 | `list_audio_devices`           | read-only  | WASAPI loopback devices `analyze_live` can record from                      |
 | `analyze_live`                 | mutating*  | solo each track, record FL's output via loopback, same analysis as stems; captures and subtracts the bleed of channels routed straight to Master (`master_direct`, `above_bleed_db`); `tracks`, `seconds`, `device`. *flips solo/mute and restores them, no undo entries |
