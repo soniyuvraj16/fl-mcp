@@ -43,6 +43,7 @@ Safety rules baked into this file
 import json
 import math
 
+import arrangement
 import channels
 import device
 import general
@@ -843,6 +844,40 @@ def cmd_set_playlist_track(args):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Arrangement time markers.  FL has no API to read a marker's position or to
+# delete one, so this is append-only: it adds markers at bar positions.
+# ---------------------------------------------------------------------------
+
+def _bar_to_ticks(bar, beats_per_bar=4):
+    return int(round((float(bar) - 1.0) * beats_per_bar * general.getRecPPQ()))
+
+
+def cmd_add_markers(args):
+    markers = args.get("markers")
+    if not isinstance(markers, list) or not markers:
+        raise ValueError("markers must be a non-empty list of {bar, name}")
+    beats = int(args.get("beats_per_bar") or 4)
+    clean = []
+    for n, m in enumerate(markers):
+        try:
+            bar = float(m["bar"]); name = str(m["name"]).strip()
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("marker %d: need bar (number) and name" % n)
+        if bar < 1:
+            raise ValueError("marker %d: bar must be >= 1, got %r" % (n, bar))
+        if not name:
+            raise ValueError("marker %d: empty name" % n)
+        clean.append((bar, name))
+    _mutating("add %d time markers" % len(clean))
+    out = []
+    for bar, name in sorted(clean):
+        t = _bar_to_ticks(bar, beats)
+        arrangement.addAutoTimeMarker(t, name)
+        out.append({"bar": bar, "ticks": t, "name": name})
+    return {"added": out, "ppq": general.getRecPPQ(), "beats_per_bar": beats}
+
+
 # Operations cmd_batch may perform.  Still a whitelist: the op name selects
 # one of the helpers above; nothing else is reachable.
 BATCH_OPS = {
@@ -916,6 +951,7 @@ COMMANDS = {
     "set_plugin_param": cmd_set_plugin_param,
     "track_peaks": cmd_track_peaks,
     "list_playlist_tracks": cmd_list_playlist_tracks,
+    "add_markers": cmd_add_markers,
     "set_playlist_track": cmd_set_playlist_track,
     "batch": cmd_batch,
 }

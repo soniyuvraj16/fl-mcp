@@ -142,10 +142,12 @@ should return the FL version.
 | `get_track_levels`             | read-only  | polls `getTrackPeaks` for `duration_s` while FL plays; peak/avg in dBFS (FL's meter value is dB-linear, not amplitude; calibrated on 24.2.2) |
 | `analyze_stems`                | read-only  | FFT of exported stem WAVs in `folder`: band energy, peaks, dynamics, clashes (server-side, no FL call) |
 | `list_audio_devices`           | read-only  | WASAPI loopback devices `analyze_live` can record from                      |
+| `separate_stems`               | read-only  | vocal / instrumental stems of a song file via the UVR models (`audio-separator` CLI, installed separately) |
 | `analyze_live`                 | mutating*  | solo each track, record FL's output via loopback, same analysis as stems; captures and subtracts the bleed of channels routed straight to Master (`master_direct`, `above_bleed_db`); `tracks`, `seconds`, `device`. *flips solo/mute and restores them, no undo entries |
 | `list_playlist_tracks`         | read-only  | playlist tracks of the current arrangement (1-based): name, colour, mute/solo |
 | `set_playlist_track`           | mutating   | `index` (1-based), `name` and/or `color`                                     |
 | `setup_playlist_tracks`        | mutating   | `tracks` list of `{index, name, color}`; one undo step                        |
+| `add_markers`                  | mutating   | `markers` list of `{bar, name}` time markers in the current arrangement (append-only) |
 | `apply_organization_template`  | mutating   | `template` (JSON), `dry_run` (default `true`)                                |
 
 `volume_db` is converted with FL's fader law, fitted on 24.2.2:
@@ -157,6 +159,22 @@ read back). On some tracks FL applies the fader on its next tick, so if
 Every mutating tool creates an undo point named `FLMCP: ...` inside FL
 **before** changing anything, so Ctrl+Z reverts it. A template application is
 one undo point for the whole batch. Read-only tools never call a setter.
+
+### Stem separation (remixing)
+
+`separate_stems(file=...)` runs the same models as Ultimate Vocal Remover
+through the `audio-separator` command line and writes WAV stems next to the
+song. It is a heavy install (PyTorch), so it lives outside this project:
+
+```powershell
+uv tool install "audio-separator[cpu]"
+# NVIDIA GPU, much faster:
+uv tool install --force --index https://download.pytorch.org/whl/cu124 --index-strategy unsafe-best-match "audio-separator[gpu]"
+```
+
+The server finds the executable on `PATH`, in `~/.local/bin`, or via the
+`FL_MCP_SEPARATOR` environment variable. The default model is the BS-Roformer
+vocal model, which downloads on first use (about 400 MB).
 
 ### Mixing workflow
 

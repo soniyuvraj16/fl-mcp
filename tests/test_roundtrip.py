@@ -241,6 +241,18 @@ def test_playlist_tracks(fl):
     assert [t["index"] for t in listed] == [1, 2, 3]
 
 
+def test_add_markers(fl):
+    project, ctrl = fl
+    r = roundtrip(project, ctrl, "add_markers", {"markers": [{"bar": 49, "name": "Drop 1"}, {"bar": 1, "name": "Intro"},
+                                                              {"bar": 33.5, "name": "Riser"}]})["result"]
+    assert r["ppq"] == 96 and [m["name"] for m in r["added"]] == ["Intro", "Riser", "Drop 1"]   # sorted by bar
+    assert project.markers == [(0, "Intro"), (int(round(32.5 * 4 * 96)), "Riser"), (48 * 4 * 96, "Drop 1")]
+    assert project.undo_log[-1] == "FLMCP: add 3 time markers"
+    for bad in ({"markers": []}, {"markers": [{"bar": 0, "name": "x"}]}, {"markers": [{"bar": 2}]},
+                {"markers": [{"bar": 2, "name": " "}]}):
+        assert not roundtrip(project, ctrl, "add_markers", bad)["ok"]
+
+
 def test_track_peaks(fl):
     project, ctrl = fl
     project.tracks[1]["peak"] = 0.9
@@ -414,12 +426,12 @@ def test_server_registers_expected_tools():
                           "set_mixer_track_mute", "set_mixer_track_solo",
                           "set_mixer_route", "create_bus",
                           "list_plugin_params", "set_plugin_param", "get_track_levels", "analyze_stems",
-                          "list_audio_devices", "analyze_live",
-                          "list_playlist_tracks", "set_playlist_track", "setup_playlist_tracks",
+                          "list_audio_devices", "analyze_live", "separate_stems",
+                          "list_playlist_tracks", "set_playlist_track", "setup_playlist_tracks", "add_markers",
                           "apply_organization_template"}
     ro = {"fl_ping", "get_project_info", "list_channels", "list_mixer_tracks",
           "list_plugin_params", "get_track_levels", "analyze_stems", "list_audio_devices",
-          "list_playlist_tracks"}
+          "list_playlist_tracks", "separate_stems"}
     for name, t in tools.items():
         ann = t.annotations
         if isinstance(ann, dict):

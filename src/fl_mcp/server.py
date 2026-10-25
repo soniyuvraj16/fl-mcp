@@ -20,13 +20,14 @@ from __future__ import annotations
 import json
 import logging
 import math
+import subprocess
 import sys
 import time
 from typing import Any
 
 from fastmcp import FastMCP
 
-from . import live
+from . import live, separate as separate_mod
 from .midi_bridge import FLBridge, FLCommandError, FLConnectionError, get_bridge
 from .stems import analyze_folder, analyze_stem, spectrum_power, summarize
 from .templates import normalise_hex, plan, strip_plan_metadata
@@ -191,6 +192,22 @@ def analyze_stems(folder: str, max_seconds: float = 60.0, top: int = 3) -> dict:
     try:
         return analyze_folder(folder, max_seconds=max_seconds, top=top)
     except (OSError, ValueError) as e:
+        raise RuntimeError(str(e)) from None
+
+
+@mcp.tool(annotations=READ_ONLY)
+def separate_stems(file: str, output_dir: str | None = None, stems: str = "vocals",
+                   model: str | None = None) -> dict:
+    """Split a song into stems with the UVR models via the audio-separator
+    command line (install once: uv tool install "audio-separator[cpu]" or
+    [gpu]). stems: "vocals" (default, just the vocal), "instrumental", or
+    "all" (vocal + instrumental). Writes WAVs into output_dir (default: a
+    "stems" folder next to the file) and returns the paths. The default model
+    is the BS-Roformer vocal model; a full song takes minutes on CPU, well
+    under a minute on a CUDA GPU. Does not touch FL."""
+    try:
+        return separate_mod.separate(file, output_dir=output_dir, stems=stems, model=model)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
         raise RuntimeError(str(e)) from None
 
 
@@ -422,6 +439,16 @@ def setup_playlist_tracks(tracks: list[dict]) -> dict:
     if not ops:
         raise RuntimeError("nothing to do: give at least one name or color")
     return _call("batch", ops=ops, label="set up %d playlist tracks" % len(tracks))
+
+
+@mcp.tool(annotations=MUTATING)
+def add_markers(markers: list[dict], beats_per_bar: int = 4) -> dict:
+    """Add named time markers to the current arrangement at bar positions, as
+    one undo step: markers = [{"bar": 1, "name": "Intro"}, {"bar": 49, "name":
+    "Drop 1"}, ...]. Bars are 1-based and may be fractional (33.5 = halfway
+    through bar 33). FL's API cannot list, move or delete markers, so this
+    only adds; remove unwanted ones in the playlist."""
+    return _call("add_markers", markers=markers, beats_per_bar=beats_per_bar)
 
 
 @mcp.tool(annotations=MUTATING)

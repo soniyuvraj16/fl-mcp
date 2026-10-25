@@ -40,6 +40,7 @@ class FakeProject:
         ]
         self.routing_notified = 0
         self.playlist_tracks = [{"name": "Track %d" % (i + 1), "color": 0x808080} for i in range(500)]
+        self.markers: list[tuple[int, str]] = []
         self.params: dict[tuple[int, int], list[dict]] = {}
         self.playing = False
         self.sent: list[bytes] = []        # SysEx the controller emitted
@@ -86,6 +87,7 @@ def build_modules(project: FakeProject) -> dict[str, types.ModuleType]:
         project.tempo = value / 1000.0
         return 0
     gn.processRECEvent = processRECEvent
+    gn.getRecPPQ = lambda: 96
     m["general"] = gn
 
     # --- midi (real constants) -------------------------------------------
@@ -169,6 +171,11 @@ def build_modules(project: FakeProject) -> dict[str, types.ModuleType]:
     pl.setParamValue = lambda v, p, index, slot=-1, pickup=0, g=False: _params(index, slot)[p].__setitem__("value", v)
     pl.getParamValueString = lambda p, index, slot=-1, pickup=0, g=False: "%d%%" % round(100 * _params(index, slot)[p]["value"])
     m["plugins"] = pl
+
+    # --- arrangement markers ------------------------------------------------
+    ar = types.ModuleType("arrangement")
+    ar.addAutoTimeMarker = lambda t, name: project.markers.append((t, name))
+    m["arrangement"] = ar
 
     # --- playlist (1-indexed tracks) ---------------------------------------
     pls = types.ModuleType("playlist")
