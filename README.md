@@ -168,8 +168,11 @@ song. It is a heavy install (PyTorch), so it lives outside this project:
 
 ```powershell
 uv tool install "audio-separator[cpu]"
-# NVIDIA GPU, much faster:
-uv tool install --force --index https://download.pytorch.org/whl/cu124 --index-strategy unsafe-best-match "audio-separator[gpu]"
+winget install Gyan.FFmpeg          # the separator shells out to ffmpeg
+# NVIDIA GPU, much faster: install from PyPI, then swap in a CUDA PyTorch
+uv tool install --force "audio-separator[gpu]"
+uv pip install --python "$env:APPDATA\uv\tools\audio-separator\Scripts\python.exe" --index-url https://download.pytorch.org/whl/cu124 torch torchaudio
+uv pip install --python "$env:APPDATA\uv\tools\audio-separator\Scripts\python.exe" audioread   # imported but not declared by 0.47
 ```
 
 The server finds the executable on `PATH`, in `~/.local/bin`, or via the

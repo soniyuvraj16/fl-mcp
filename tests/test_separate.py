@@ -17,10 +17,12 @@ def test_separate_builds_command_and_reports_new_files(tmp_path, monkeypatch):
     out.mkdir()
     (out / "old.wav").write_bytes(b"old")
     monkeypatch.setattr(separate, "find_executable", lambda: "C:/fake/audio-separator.exe")
+    monkeypatch.setattr(separate, "find_ffmpeg_dir", lambda: "C:/fake/ffmpeg/bin")
     calls = []
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
+        assert kw["env"]["PATH"].startswith("C:/fake/ffmpeg/bin")
         (out / "song_(Vocals)_model.wav").write_bytes(b"new")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -48,6 +50,10 @@ def test_separate_errors(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="not installed"):
         separate.separate(str(song))
     monkeypatch.setattr(separate, "find_executable", lambda: "exe")
+    monkeypatch.setattr(separate, "find_ffmpeg_dir", lambda: None)
+    with pytest.raises(RuntimeError, match="ffmpeg"):
+        separate.separate(str(song))
+    monkeypatch.setattr(separate, "find_ffmpeg_dir", lambda: "C:/ff")
     failing = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "boom\nCUDA out of memory")
     with pytest.raises(RuntimeError, match="out of memory"):
         separate.separate(str(song), runner=failing)

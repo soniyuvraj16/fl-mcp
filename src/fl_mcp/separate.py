@@ -10,6 +10,7 @@ The server shells out to the executable rather than importing torch itself.
 
 from __future__ import annotations
 
+import glob
 import os
 import shutil
 import subprocess
@@ -34,6 +35,22 @@ def find_executable() -> str | None:
     return None
 
 
+def find_ffmpeg_dir() -> str | None:
+    """audio-separator shells out to `ffmpeg`; find it on PATH or in a winget install."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return os.path.dirname(found)
+    local = os.environ.get("LOCALAPPDATA", "")
+    pats = [os.path.join(local, "Microsoft", "WinGet", "Packages", "Gyan.FFmpeg*", "**", "bin", "ffmpeg.exe"),
+            os.path.join(local, "Microsoft", "WinGet", "Links", "ffmpeg.exe"),
+            os.path.join("C:\\", "ffmpeg", "bin", "ffmpeg.exe")]
+    for pat in pats:
+        hits = glob.glob(pat, recursive=True)
+        if hits:
+            return os.path.dirname(hits[0])
+    return None
+
+
 def separate(file: str, output_dir: str | None = None, stems: str = "vocals",
              model: str | None = None, output_format: str = "WAV",
              timeout_s: float = 3600.0, runner=subprocess.run) -> dict:
@@ -53,9 +70,16 @@ def separate(file: str, output_dir: str | None = None, stems: str = "vocals",
     single = STEM_NAMES[stems]
     if single:
         cmd += ["--single_stem", single]
+    env = dict(os.environ)
+    ffdir = find_ffmpeg_dir()
+    if ffdir:
+        env["PATH"] = ffdir + os.pathsep + env.get("PATH", "")
+    else:
+        raise RuntimeError("ffmpeg was not found; audio-separator needs it on PATH "
+                           "(Windows: winget install Gyan.FFmpeg)")
     before = {f: os.path.getmtime(os.path.join(output_dir, f)) for f in os.listdir(output_dir)}
     t0 = time.time()
-    proc = runner(cmd, capture_output=True, text=True, timeout=timeout_s)
+    proc = runner(cmd, capture_output=True, text=True, timeout=timeout_s, env=env)
     elapsed = round(time.time() - t0, 1)
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-8:]
